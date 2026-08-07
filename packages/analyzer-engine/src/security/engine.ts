@@ -18,7 +18,7 @@ import {
 } from './taint'
 import { PATTERN_RULES, TAINT_ASSIGN_SINKS, TAINT_SINKS, asNamedValue, ruleAppliesTo, type TaintAssignSink, type TaintSink } from './rules'
 import { CWE } from './cwe'
-import type { CodeLocation, Flow, SastFinding, SastResult } from './types'
+import type { CodeLocation, Flow, SastDiagnostics, SastFinding, SastResult } from './types'
 
 /**
  * The SAST engine: parse → taint → match rules → findings.
@@ -47,10 +47,73 @@ export interface ScanInput {
 export interface ScanOptions {
   /** Rule ids to keep. A rule outside the set never runs against a node. */
   ruleIds?: ReadonlySet<string>
+  /** Per-file wall-clock ceiling. Defaults to {@link FILE_TIME_BUDGET_MS}. */
+  fileTimeBudgetMs?: number
+  /** Whole-pass wall-clock ceiling. Defaults to {@link PASS_TIME_BUDGET_MS}. */
+  passTimeBudgetMs?: number
 }
 
 const MAX_FINDINGS_PER_FILE = 100
 const MAX_FINDINGS_PER_SCAN = 100_000
+
+/**
+ * Wall-clock ceilings for the security pass.
+ *
+ * The node and taint budgets bound WORK, not TIME, and work is not a proxy for
+ * time: one visit can cost microseconds or, on a pathological shape, orders of
+ * magnitude more. Only a clock bounds the answer to "when does this finish".
+ *
+ * The numbers come from measurement, not taste. Over 8,976 files — CPython
+ * 3.14's stdlib (1,852), its site-packages (6,449, including sympy and
+ * pygments), and this repository's own `src/` (337) — the slowest single file
+ * took 609 ms, p99 was 101 ms, and p50 was 3 ms. 5 s is ~8x the slowest file any
+ * of those corpora produced, so nothing that completes today can trip it, while
+ * a file that would otherwise run for minutes is cut in seconds. The whole
+ * site-packages pass finishes in 63 s, so the 5-minute pass ceiling is ~5x the
+ * largest corpus measured: a repository would need roughly 30,000 analyzable
+ * files to approach it honestly.
+ *
+ * These are deliberately NOT determinism-preserving, and that is the trade:
+ * identical output run-to-run is worth more than a scan that never returns, and
+ * the moment a ceiling fires the diagnostics name the files it cut so the
+ * result is read as partial rather than clean. A silent skip would be worse
+ * than the hang it replaces.
+ *
+ * The hosted runner keeps its own, tighter job budget on top of these
+ * (`runIsolatedSecurityScan`); these are the backstop for every in-process
+ * caller — the CLI's local pass and the agent hooks — which had none.
+ */
+export const FILE_TIME_BUDGET_MS = 5_000
+export const PASS_TIME_BUDGET_MS = 300_000
+
+/** How many capped/skipped paths the diagnostics carry. The counts stay
+ *  authoritative for the totals; this bounds only what gets named. */
+const MAX_DISCLOSED_PATHS = 50
+
+/**
+ * A wall-clock ceiling that is cheap enough to consult per AST node.
+ *
+ * `Date.now()` per node measurably costs on a 400k-node tree, so the clock is
+ * read once every {@link CLOCK_STRIDE} calls. Once expired it stays expired —
+ * no further clock reads, and no chance of a ceiling "un-firing".
+ */
+const CLOCK_STRIDE = 512
+
+function deadlineGate(deadline: number): () => boolean {
+  // Starts at 1 so the FIRST consultation reads the clock: a budget already
+  // spent when the file began must fire even on a file too small to reach the
+  // stride. After that the stride amortizes the cost away.
+  let countdown = 1
+  let expired = false
+  return () => {
+    if (expired) return true
+    if (--countdown > 0) return false
+    countdown = CLOCK_STRIDE
+    if (Date.now() < deadline) return false
+    expired = true
+    return true
+  }
+}
 
 /** Scan a set of source files and return findings + honest diagnostics. */
 export async function scanFiles(
@@ -64,6 +127,14 @@ export async function scanFiles(
   let truncatedFiles = 0
   let findingsTruncated = false
   const degraded = new Set<SastLanguage>()
+  let timeCappedFiles = 0
+  let timeSkippedFiles = 0
+  const timeCappedPaths: string[] = []
+  const timeSkippedPaths: string[] = []
+
+  const fileBudgetMs = options.fileTimeBudgetMs ?? FILE_TIME_BUDGET_MS
+  const passDeadline = Date.now() + (options.passTimeBudgetMs ?? PASS_TIME_BUDGET_MS)
+  let passBudgetExceeded = false
 
   // web-tree-sitter grows its WASM heap while parsing and does not return that
   // high-water allocation to the host process between files. Continuing with
@@ -90,14 +161,36 @@ export async function scanFiles(
       filesSkipped++
       continue
     }
+    // The pass ceiling. A file past it is not analyzed at all, and is named as
+    // skipped rather than counted as scanned-and-clean.
+    if (passBudgetExceeded || Date.now() >= passDeadline) {
+      passBudgetExceeded = true
+      filesSkipped++
+      timeSkippedFiles++
+      if (timeSkippedPaths.length < MAX_DISCLOSED_PATHS) timeSkippedPaths.push(file.filePath)
+      continue
+    }
     try {
-      const fileFindings = await scanOne(file.filePath, file.content, lang, degraded, parser, options)
+      const fileFindings = await scanOne(
+        file.filePath,
+        file.content,
+        lang,
+        degraded,
+        parser,
+        options,
+        // Never let one file spend the whole pass budget.
+        Math.min(fileBudgetMs, passDeadline - Date.now()),
+      )
       if (fileFindings === null) {
         filesSkipped++
         continue
       }
       filesScanned++
       if (fileFindings.truncated) truncatedFiles++
+      if (fileFindings.timeCapped) {
+        timeCappedFiles++
+        if (timeCappedPaths.length < MAX_DISCLOSED_PATHS) timeCappedPaths.push(file.filePath)
+      }
       for (const f of fileFindings.findings) {
         if (findings.length >= MAX_FINDINGS_PER_SCAN) {
           findingsTruncated = true
@@ -125,6 +218,9 @@ export async function scanFiles(
       truncatedFiles,
       findingsTruncated,
       resourceLimitReached: memoryLimitReached,
+      ...(timeCappedFiles ? { timeCappedFiles, timeCappedPaths } : {}),
+      ...(timeSkippedFiles ? { timeSkippedFiles, timeSkippedPaths } : {}),
+      ...(passBudgetExceeded ? { budgetExceeded: true } : {}),
     },
   }
 }
@@ -146,12 +242,26 @@ export function mergeSastResults(results: SastResult[], inputFiles: number): Sas
   let filesScanned = 0
   let filesSkipped = 0
   let truncatedFiles = 0
+  let timeCappedFiles = 0
+  let timeSkippedFiles = 0
+  const timeCappedPaths: string[] = []
+  const timeSkippedPaths: string[] = []
   for (const result of results) {
     filesScanned += result.diagnostics.filesScanned
     filesSkipped += result.diagnostics.filesSkipped
     truncatedFiles += result.diagnostics.truncatedFiles
+    timeCappedFiles += result.diagnostics.timeCappedFiles ?? 0
+    timeSkippedFiles += result.diagnostics.timeSkippedFiles ?? 0
     for (const language of result.diagnostics.degradedLanguages) degradedLanguages.add(language)
+    for (const path of result.diagnostics.timeCappedPaths ?? []) {
+      if (timeCappedPaths.length < MAX_DISCLOSED_PATHS) timeCappedPaths.push(path)
+    }
+    for (const path of result.diagnostics.timeSkippedPaths ?? []) {
+      if (timeSkippedPaths.length < MAX_DISCLOSED_PATHS) timeSkippedPaths.push(path)
+    }
   }
+  timeCappedPaths.sort()
+  timeSkippedPaths.sort()
 
   return {
     findings,
@@ -164,6 +274,8 @@ export function mergeSastResults(results: SastResult[], inputFiles: number): Sas
       findingsTruncated,
       resourceLimitReached: results.some((result) => result.diagnostics.resourceLimitReached),
       budgetExceeded: results.some((result) => result.diagnostics.budgetExceeded),
+      ...(timeCappedFiles ? { timeCappedFiles, timeCappedPaths } : {}),
+      ...(timeSkippedFiles ? { timeSkippedFiles, timeSkippedPaths } : {}),
       failureReason: results.find((result) => result.diagnostics.failureReason)?.diagnostics.failureReason,
     },
   }
@@ -172,6 +284,48 @@ export function mergeSastResults(results: SastResult[], inputFiles: number): Sas
 interface FileScan {
   findings: SastFinding[]
   truncated: boolean
+  /** The per-file wall-clock ceiling fired: analysis of this file is partial. */
+  timeCapped: boolean
+}
+
+/**
+ * The sentence a receipt or a hosted report prints when a wall-clock ceiling
+ * fired — naming the files, not just counting them.
+ *
+ * One function so the CLI receipt and the hosted report say the SAME thing in
+ * the same voice. A timeout that quietly produced "no findings" would be worse
+ * than the hang it replaced, so the wording is explicit that a file the clock
+ * cut was not cleared: silence about it is missing evidence, not absence of a
+ * defect. Returns undefined when no ceiling fired, so callers can spread it.
+ */
+export function timeCeilingDisclosure(diagnostics: SastDiagnostics): string | undefined {
+  const parts: string[] = []
+  const capped = diagnostics.timeCappedFiles ?? 0
+  const skipped = diagnostics.timeSkippedFiles ?? 0
+  if (capped > 0) {
+    parts.push(
+      // "a time ceiling", not "the per-file ceiling": a file that starts just
+      // before the pass deadline is cut by the pass budget through the same
+      // gate, and the sentence has to stay true in both cases.
+      `a time ceiling stopped security analysis partway through ${capped} file(s) — ` +
+        `${namePaths(diagnostics.timeCappedPaths ?? [], capped)}; the rules that had not run there reported nothing, ` +
+        `which is not the same as finding nothing`,
+    )
+  }
+  if (skipped > 0) {
+    parts.push(
+      `the whole-pass time ceiling was reached and ${skipped} file(s) were not analyzed at all — ` +
+        `${namePaths(diagnostics.timeSkippedPaths ?? [], skipped)}`,
+    )
+  }
+  return parts.length > 0 ? parts.join('; ') : undefined
+}
+
+/** Name the paths we kept, and say plainly how many we did not keep. */
+function namePaths(paths: string[], total: number): string {
+  if (paths.length === 0) return 'their paths were not retained'
+  const rest = total - paths.length
+  return paths.join(', ') + (rest > 0 ? `, and ${rest} more` : '')
 }
 
 /** Which param indexes of a local function reach which sink. */
@@ -194,7 +348,11 @@ async function scanOne(
   degraded: Set<SastLanguage>,
   parser: SastParser,
   options: ScanOptions,
+  timeBudgetMs: number,
 ): Promise<FileScan | null> {
+  // The clock starts before the parse, so a slow parse eats into this file's
+  // own budget rather than escaping the ceiling.
+  const outOfTime = deadlineGate(Date.now() + timeBudgetMs)
   const parsed = await parser.parse(lang, content)
   if (!parsed) {
     degraded.add(lang)
@@ -218,6 +376,15 @@ async function scanOne(
 
   let nodeCount = 0
   let truncated = false
+  let timeCapped = false
+  // Consulted at every phase boundary and inside every walk. Once it fires the
+  // remaining phases short-circuit: partial findings are kept and the file is
+  // reported as capped, never as a fully-analyzed file with nothing in it.
+  const expired = () => {
+    if (!outOfTime()) return false
+    timeCapped = true
+    return true
+  }
 
   // ---- gather functions & solve taint per function ----
   const fnRecords: FnRecord[] = []
@@ -226,6 +393,7 @@ async function scanOne(
       truncated = true
       return
     }
+    if (expired()) return
     const fn = asFunction(node, lang)
     if (fn && fn.body) {
       const ft = analyzeFunction(fn, lang)
@@ -236,8 +404,10 @@ async function scanOne(
   // ---- direct sink findings + build interprocedural summaries ----
   for (const rec of fnRecords) {
     if (!rec.fn.body) continue
+    if (expired()) break
     walk(rec.fn.body, (node) => {
       if (findings.length >= MAX_FINDINGS_PER_FILE) return
+      if (expired()) return
       if (isNestedFnBoundary(node, rec.fn, lang)) return
       // Assignment-shaped sinks (XSS): `__html:` is a JSX pair and
       // `el.innerHTML =` an assignment, so neither reaches a call-based rule.
@@ -284,8 +454,10 @@ async function scanOne(
   if (summaries.size > 0) {
     for (const rec of fnRecords) {
       if (!rec.fn.body) continue
+      if (expired()) break
       walk(rec.fn.body, (node) => {
         if (findings.length >= MAX_FINDINGS_PER_FILE) return
+        if (expired()) return
         const call = asCall(node, lang)
         if (!call || call.isConstruct) return
         if (!bindsToLocalFn(call)) return // don't bind a member call to a same-name local fn
@@ -306,7 +478,7 @@ async function scanOne(
   }
 
   // ---- pattern rules (single pass over the whole tree) ----
-  runPatternRules(parsed.rootNode, applicablePatterns, lang, filePath, findings, lines)
+  runPatternRules(parsed.rootNode, applicablePatterns, lang, filePath, findings, lines, expired)
 
   parsed.release()
   // A drained taint budget means some solve or sink query degraded to
@@ -314,7 +486,11 @@ async function scanOne(
   // nodes (parsed.hasError) is still fully walked best-effort, and the
   // per-file findings cap only bounds OUTPUT — neither degrades coverage.
   if (fnRecords.some((rec) => taintBudgetExhausted(rec.ft))) truncated = true
-  return { findings, truncated }
+  // A time-capped file is the same coverage loss as a node-budget one, so it
+  // rides the SAME `truncated` path every consumer already handles. The
+  // separate flag only lets the caller name it.
+  if (timeCapped) truncated = true
+  return { findings, truncated, timeCapped }
 }
 
 /** Pattern-rule pass over a tree. Cheap (no taint), so it always runs even when
@@ -326,12 +502,14 @@ function runPatternRules(
   filePath: string,
   findings: SastFinding[],
   lines: string[],
+  expired: () => boolean,
 ): void {
   // Per-rule path exclusion (seed/migration/ops directories where the pattern
   // is expected and harmless) — resolved once per file, not per node.
   const activePatterns = patterns.filter((rule) => !rule.excludePath || !rule.excludePath.test(filePath))
   walk(root, (node) => {
     if (findings.length >= MAX_FINDINGS_PER_FILE) return
+    if (expired()) return
     for (const rule of activePatterns) {
       for (const hit of rule.test(node, lang)) {
         const info = CWE[rule.cweKey]

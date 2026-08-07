@@ -102,18 +102,22 @@ export const deadCodeAnalyzer: Analyzer = {
     // bounds OUTPUT over an analysis that covered every candidate file.
     const truncated = jsFiles.length > candidateLimit
     const output = findings.slice(0, findingLimit)
+    // Unreported, but retained as evidence that this tree already contained
+    // them — a baseline/final comparison must not read a finding surfacing into
+    // a freed cap slot as one the change introduced.
+    const withheld = findings.slice(findingLimit)
     if (truncated) {
       return incompleteAnalyzerOutput(output, {
         truncated: true,
         detail: `Dead-code analysis hit a bound (${jsFiles.length} candidate files, ${findings.length} matches).`,
         metrics: { candidates: jsFiles.length, candidateLimit, matches: findings.length, findingLimit },
-      })
+      }, withheld)
     }
     if (findings.length > findingLimit) {
       return annotatedAnalyzerOutput(output, {
         detail: `Dead-code output capped at ${findingLimit} of ${findings.length} matches.`,
         metrics: { candidates: jsFiles.length, candidateLimit, matches: findings.length, findingLimit },
-      })
+      }, withheld)
     }
     return output
   },

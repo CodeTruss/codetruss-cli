@@ -184,22 +184,56 @@ const CALL_TYPES: Record<SastLanguage, Set<string>> = {
   rust: new Set(['call_expression', 'macro_invocation']),
 }
 
+/**
+ * The callee child of a call node — what {@link asCall} reports as
+ * {@link NCall.callee} — resolved without building an `NCall`.
+ *
+ * Split out because `dottedName` needs ONLY this. Reaching it through `asCall`
+ * made naming a chained call exponential: `asCall` eagerly resolves `fullName`
+ * and `receiverName` (two `dottedName` descents into the same receiver) and
+ * `dottedName` then descended into the callee a third time — 3x the work per
+ * link of a method chain, so `a.f().f()…` cost 3^links. An 18-link chain of
+ * `str.replace()` (pygments' `escape_tex`) took hours in a 19 KB file.
+ */
+function calleeOf(node: SyntaxNode, lang: SastLanguage): SyntaxNode | null {
+  if (lang === 'java') {
+    // method_invocation names the method; object_creation/explicit_constructor
+    // name the type.
+    return node.type === 'method_invocation' ? field(node, 'name') : field(node, 'type')
+  }
+  if (lang === 'python') return field(node, 'function')
+  if (lang === 'ruby') return field(node, 'method')
+  if (lang === 'php') {
+    if (node.type === 'object_creation_expression') {
+      return node.namedChildren.find((c) => c.type === 'name' || c.type === 'qualified_name') ?? null
+    }
+    if (node.type === 'function_call_expression') return field(node, 'function')
+    // member_call_expression / scoped_call_expression
+    return field(node, 'name')
+  }
+  if (lang === 'rust' && node.type === 'macro_invocation') return field(node, 'macro')
+  // JS family, C#, Go, Rust call_expression / new / invocation:
+  return node.type === 'new_expression'
+    ? field(node, 'constructor')
+    : field(node, 'function') ?? field(node, 'type')
+}
+
 export function asCall(node: SyntaxNode, lang: SastLanguage): NCall | null {
   if (!CALL_TYPES[lang].has(node.type)) return null
   const line = node.startPosition.row + 1
   const isConstruct = node.type === 'new_expression' || node.type === 'object_creation_expression'
+  const callee = calleeOf(node, lang)
 
   if (lang === 'java') {
     if (node.type === 'method_invocation') {
       const obj = field(node, 'object')
-      const nameNode = field(node, 'name')
-      const name = nameNode?.text ?? ''
+      const name = callee?.text ?? ''
       const receiverName = obj ? dottedName(obj, lang) : null
       const fullName = receiverName ? `${receiverName}.${name}` : name
       return {
         node,
         line,
-        callee: nameNode,
+        callee,
         fullName,
         method: name,
         receiver: obj,
@@ -209,48 +243,36 @@ export function asCall(node: SyntaxNode, lang: SastLanguage): NCall | null {
       }
     }
     // object_creation_expression: new Type(args)
-    const type = field(node, 'type')
-    const name = type?.text ?? ''
-    return mk(node, line, type, null, name, argList(field(node, 'arguments')), true, lang)
+    return mk(node, line, callee, null, callee?.text ?? '', argList(field(node, 'arguments')), true, lang)
   }
 
   if (lang === 'python') {
-    const fn = field(node, 'function')
-    return mk(node, line, fn, receiverOf(fn, lang), lastSegment(fn, lang), argList(field(node, 'arguments')), false, lang)
+    return mk(node, line, callee, receiverOf(callee, lang), lastSegment(callee, lang), argList(field(node, 'arguments')), false, lang)
   }
 
   if (lang === 'ruby') {
     const recv = field(node, 'receiver')
-    const method = field(node, 'method')?.text ?? ''
-    return mk(node, line, field(node, 'method'), recv, method, argList(field(node, 'arguments')), false, lang)
+    return mk(node, line, callee, recv, callee?.text ?? '', argList(field(node, 'arguments')), false, lang)
   }
 
   if (lang === 'php') {
     if (node.type === 'object_creation_expression') {
-      const type = node.namedChildren.find((c) => c.type === 'name' || c.type === 'qualified_name')
-      return mk(node, line, type ?? null, null, type?.text ?? '', argList(field(node, 'arguments')), true, lang)
+      return mk(node, line, callee, null, callee?.text ?? '', argList(field(node, 'arguments')), true, lang)
     }
     if (node.type === 'function_call_expression') {
-      const fn = field(node, 'function')
-      return mk(node, line, fn, null, fn?.text?.replace(/^\\/, '') ?? '', argList(field(node, 'arguments')), false, lang)
+      return mk(node, line, callee, null, callee?.text?.replace(/^\\/, '') ?? '', argList(field(node, 'arguments')), false, lang)
     }
     // member_call_expression / scoped_call_expression
     const obj = field(node, 'object') ?? field(node, 'scope')
-    const name = field(node, 'name')?.text ?? ''
-    return mk(node, line, field(node, 'name'), obj, name, argList(field(node, 'arguments')), false, lang)
+    return mk(node, line, callee, obj, callee?.text ?? '', argList(field(node, 'arguments')), false, lang)
   }
 
   if (lang === 'rust' && node.type === 'macro_invocation') {
-    const macro = field(node, 'macro')
-    return mk(node, line, macro, null, macro?.text ?? '', argList(node.namedChildren.find((c) => c.type === 'token_tree') ?? null), false, lang)
+    return mk(node, line, callee, null, callee?.text ?? '', argList(node.namedChildren.find((c) => c.type === 'token_tree') ?? null), false, lang)
   }
 
   // JS family, C#, Go, Rust call_expression / new / invocation:
-  const fnField = node.type === 'new_expression'
-    ? field(node, 'constructor')
-    : field(node, 'function') ?? field(node, 'type')
-  const fn = fnField
-  return mk(node, line, fn, receiverOf(fn, lang), lastSegment(fn, lang), argList(field(node, 'arguments')), isConstruct, lang)
+  return mk(node, line, callee, receiverOf(callee, lang), lastSegment(callee, lang), argList(field(node, 'arguments')), isConstruct, lang)
 }
 
 function mk(
@@ -360,8 +382,12 @@ export function dottedName(node: SyntaxNode, lang: SastLanguage): string | null 
   }
   const sub = subscriptBase(n)
   if (sub) return dottedName(sub, lang)
-  const call = asCall(n, lang)
-  if (call && call.callee) return dottedName(call.callee, lang)
+  // `calleeOf`, not `asCall`: building an NCall here re-derives this same name
+  // twice more and makes a chained call exponential in its length.
+  if (CALL_TYPES[lang].has(n.type)) {
+    const callee = calleeOf(n, lang)
+    if (callee) return dottedName(callee, lang)
+  }
   switch (n.type) {
     case 'identifier':
     case 'property_identifier':
