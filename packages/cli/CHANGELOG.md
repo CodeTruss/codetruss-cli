@@ -5,6 +5,43 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.44 — 2026-08-07
+
+- **The person you hand a receipt to can now check it.** Until this release a
+  receipt could only be verified by the repository that produced it: `codetruss
+  verify` measures a receipt against the signing keys the local `.codetruss.yml`
+  pins, so the client, auditor, or acquirer the evidence was written for got
+  `receipt signer <fp> does not match trusted key <fp>` and stopped there. That
+  is most of the point of handing someone a receipt, and it did not work. The
+  gap was concrete rather than theoretical: publishing one of our own receipts
+  publicly required shipping a bespoke standalone verifier alongside it, because
+  the CLI would not check another install's receipt. `codetruss verify-receipt
+  <receipt.json|dir>` is the supported path. It needs nothing but the files —
+  no checkout, no account, no configuration — and it reports two claims
+  separately, because they are two different facts and merging them would be a
+  lie. **Integrity** is that these bytes have not changed since they were
+  signed; it is established from the receipt alone, by checking the signature
+  under the key the receipt carries, reproducing the Markdown byte-for-byte from
+  the signed JSON, and matching the recorded digests. **Provenance** is that a
+  party you trust signed them, and it is established only against a
+  `--public-key` you obtained from that party some other way. A receipt vouching
+  for its own key proves nothing about who wrote it — forging one takes a
+  keypair and a minute — so a run without a supplied key can never print a
+  verified result or exit 0. That ceiling is the feature, not a missing half of
+  one. The exit codes carry the distinction into scripts: 0 for both claims, 1
+  for bytes that are intact but unattributed, 2 for bytes that are not what was
+  signed. When integrity fails, provenance is not evaluated at all and says so,
+  rather than printing a key match over altered bytes. Evidence a publisher
+  withheld — usually the patch, the only part of a receipt that quotes source —
+  is reported as unchecked next to the digest the signature does cover, and the
+  integrity line names the hole instead of reading clean. `codetruss verify` is
+  unchanged and still requires a trusted key; its refusal now names the command
+  that can check a foreign receipt instead of dead-ending. Both paths run one
+  shared check list against one shared set of accepted Markdown renderings, so
+  neither can drift into checking less than it claims, and every superseded
+  profile wording stays reproducible, so receipts signed by older releases keep
+  verifying byte-for-byte.
+
 ## 0.2.43 — 2026-08-07
 
 - **A release can no longer reach you carrying code that does not compile.**

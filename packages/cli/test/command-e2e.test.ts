@@ -1047,4 +1047,45 @@ describe('CLI snapshot and delta enforcement', () => {
     expect(preview.stdout).not.toContain(root)
     expect(preview.stdout).not.toContain('process.exit(0)')
   }, 30_000)
+
+  it('checks a delivered receipt outside any repository, and separates integrity from provenance', async () => {
+    const producer = await repository()
+    await writeFile(join(producer, 'example.ts'), 'export const value = 1\n')
+    git(producer, 'add', 'example.ts')
+    git(producer, 'commit', '--quiet', '-m', 'baseline')
+    await writeFile(join(producer, 'example.ts'), 'export const value = 2\n')
+    expect(runCli(producer, ['review', '--task', 'Change the value']).status).toBe(1)
+
+    // What a client, auditor or acquirer actually receives: the receipt files,
+    // no repository, no key, no CodeTruss install of the producer's.
+    const reader = await mkdtemp(join(tmpdir(), 'codetruss-delivered-'))
+    cleanup.push(reader, `${reader}-home`)
+    const delivered = join(reader, 'evidence')
+    await mkdir(delivered)
+    const producedDir = join(producer, '.codetruss', 'receipts')
+    const receipt = await latestReceipt(producer)
+    for (const suffix of ['.json', '.md', '.sig']) {
+      await writeFile(join(delivered, `${receipt.sessionId}${suffix}`), await readFile(join(producedDir, `${receipt.sessionId}${suffix}`)))
+    }
+
+    const alone = runCli(reader, ['verify-receipt', delivered])
+    expect(alone.status, `${alone.stderr}\n${alone.stdout}`).toBe(1)
+    expect(alone.stdout).toContain('integrity: ESTABLISHED')
+    expect(alone.stdout).toContain('provenance: NOT ESTABLISHED')
+    expect(alone.stderr).not.toContain('Git repository')
+
+    // The key arriving from the producer rather than from the receipt is the
+    // whole of what makes the next run mean anything more than the last one.
+    const keyPath = join(reader, 'producer.pem')
+    await writeFile(keyPath, receipt.evidence.publicKey!)
+    const attributed = runCli(reader, ['verify-receipt', join(delivered, `${receipt.sessionId}.json`), '--public-key', keyPath])
+    expect(attributed.status, `${attributed.stderr}\n${attributed.stdout}`).toBe(0)
+    expect(attributed.stdout).toContain('provenance: ESTABLISHED')
+
+    await writeFile(join(delivered, `${receipt.sessionId}.md`), '# CodeTruss receipt — PASS\n')
+    const tampered = runCli(reader, ['verify-receipt', delivered, '--public-key', keyPath])
+    expect(tampered.status).toBe(2)
+    expect(tampered.stdout).toContain('integrity: NOT ESTABLISHED')
+    expect(tampered.stdout).toContain('provenance: NOT CHECKED')
+  }, 30_000)
 })
