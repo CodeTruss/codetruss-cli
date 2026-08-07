@@ -33,7 +33,7 @@ codetruss setup
 Homebrew on macOS:
 
 ```bash
-brew install DeliriumPulse/codetruss/codetruss
+brew install CodeTruss/codetruss/codetruss
 ```
 
 Windows PowerShell:
@@ -90,24 +90,24 @@ separately installed CLI. They contain no second analyzer, add no MCP server, an
 create no new upload path.
 
 ```bash
-claude plugin marketplace add DeliriumPulse/codetruss-plugins
+claude plugin marketplace add CodeTruss/codetruss-plugins
 claude plugin install codetruss@codetruss
 ```
 
 ```bash
-codex plugin marketplace add DeliriumPulse/codetruss-plugins
+codex plugin marketplace add CodeTruss/codetruss-plugins
 codex plugin add codetruss@codetruss
 ```
 
 Agent Skills clients can install the same canonical skill for both agents:
 
 ```bash
-npx --yes skills add DeliriumPulse/codetruss-plugins \
+npx --yes skills add CodeTruss/codetruss-plugins \
   --skill codetruss --agent claude-code codex -y
 ```
 
 See the [skills.sh listing](https://skills.sh/deliriumpulse/codetruss-plugins/codetruss)
-or [DeliriumPulse/codetruss-plugins](https://github.com/DeliriumPulse/codetruss-plugins)
+or [CodeTruss/codetruss-plugins](https://github.com/CodeTruss/codetruss-plugins)
 for the MIT-licensed manifests, skill instructions, and marketplace source.
 
 ## Commands
@@ -323,7 +323,7 @@ clean global install.
 Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-0.2.39.tgz --repo DeliriumPulse/codetruss-cli
+gh attestation verify codetruss-cli-0.2.39.tgz --repo CodeTruss/codetruss-cli
 shasum -a 256 -c codetruss-cli-0.2.39.tgz.sha256
 ```
 
