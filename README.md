@@ -103,7 +103,7 @@ for the MIT-licensed manifests, skill instructions, and marketplace source.
 
 ## Commands
 
-```
+```text
 codetruss run --task "..." [--allow GLOB] [--deny GLOB] [--verify CMD] [--no-verify]
               [--llm] [--provider anthropic|openai|claude] -- <agent-cmd>
 codetruss review [--staged] --task "..." [--allow GLOB] [--deny GLOB] [--verify CMD]
@@ -125,7 +125,7 @@ codetruss hooks install|status|doctor|uninstall [pre-commit|claude|codex|all]
 detected verification commands are trusted to run. `verify-policy trust-key`
 is separate: it appends your local signing key to `signing.publicKeys` so a
 teammate can sign receipts as themselves instead of sharing a private key.
-Commit `.codetruss.yml` afterwards so the rest of the team inherits the change.
+Commit `.codetruss.yml` afterward so the rest of the team inherits the change.
 It is accepted by the CLI but omitted from the built-in `--help` banner in
 0.2.30.
 
