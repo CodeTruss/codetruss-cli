@@ -72,11 +72,28 @@ export interface SastDiagnostics {
   degradedLanguages: SastLanguage[]
   /** Files whose scan hit the per-file budget and returned partial results. */
   truncatedFiles: number
+  /**
+   * Files the per-file WALL-CLOCK ceiling cut short. Also counted in
+   * {@link truncatedFiles} — it is the same coverage loss as the node budget —
+   * so every consumer that already handles truncation handles this too.
+   */
+  timeCappedFiles?: number
+  /** Paths of those files, so a report can NAME them and not only count them.
+   *  Bounded; {@link timeCappedFiles} stays authoritative for the total. */
+  timeCappedPaths?: string[]
+  /**
+   * Files never analyzed at all because the whole-pass wall-clock ceiling was
+   * reached first. Also counted in {@link filesSkipped}.
+   */
+  timeSkippedFiles?: number
+  /** Paths of those files, bounded the same way. */
+  timeSkippedPaths?: string[]
   /** The global finding cap was reached and later findings were omitted. */
   findingsTruncated: boolean
   /** A process resource bound stopped a batch before every file was scanned. */
   resourceLimitReached?: boolean
-  /** The isolated scan stopped before the enclosing job's wall-clock limit. */
+  /** A wall-clock ceiling stopped the scan before every file was analyzed —
+   *  either the engine's own pass ceiling or the isolated runner's job limit. */
   budgetExceeded?: boolean
   /** A systemic child-runtime failure stopped later batches from starting. */
   failureReason?: string

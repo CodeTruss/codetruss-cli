@@ -139,33 +139,69 @@ export interface AnalyzerRunResult {
 }
 
 const COMPLETION = Symbol('codetruss.analyzer-completion')
-type FindingList = AnalyzerFinding[] & { [COMPLETION]?: Omit<AnalyzerRunResult, 'findings'> }
+const WITHHELD = Symbol('codetruss.analyzer-withheld')
+type FindingList = AnalyzerFinding[] & {
+  [COMPLETION]?: Omit<AnalyzerRunResult, 'findings'>
+  [WITHHELD]?: AnalyzerFinding[]
+}
+
+/**
+ * Record findings an OUTPUT CAP removed from `findings`.
+ *
+ * An output cap is not a coverage loss — every candidate was still examined —
+ * but the difference matters to anything that compares two runs of the same
+ * analyzer. When a change RESOLVES findings, cap slots free up and previously
+ * capped findings in untouched files enter the reported list for the first
+ * time. A comparison that only ever saw reported lists calls those introduced,
+ * and a signed receipt then asserts that a change broke code its author never
+ * opened. The mirror image is just as wrong: a finding pushed BELOW the cap by
+ * newer ones reads as resolved when nothing fixed it.
+ *
+ * So the withheld findings ride along, unreported, purely as evidence of what
+ * this tree contained. They stay out of `AnalyzerRunResult` on purpose: the cap
+ * still governs what a pass reports and persists, and `analyzerWithheld()` is
+ * the only way to read them.
+ */
+function attachOutput(
+  findings: AnalyzerFinding[],
+  completion: Omit<AnalyzerRunResult, 'findings'>,
+  withheld: AnalyzerFinding[],
+): AnalyzerFinding[] {
+  Object.defineProperty(findings, COMPLETION, { value: completion, enumerable: false })
+  if (withheld.length) Object.defineProperty(findings, WITHHELD, { value: withheld, enumerable: false })
+  return findings
+}
 
 export function incompleteAnalyzerOutput(
   findings: AnalyzerFinding[],
   status: Omit<AnalyzerRunResult, 'findings' | 'complete'>,
+  withheld: AnalyzerFinding[] = [],
 ): AnalyzerFinding[] {
-  Object.defineProperty(findings, COMPLETION, {
-    value: { ...status, complete: false },
-    enumerable: false,
-  })
-  return findings
+  return attachOutput(findings, { ...status, complete: false }, withheld)
 }
 
 export function annotatedAnalyzerOutput(
   findings: AnalyzerFinding[],
   status: Omit<AnalyzerRunResult, 'findings' | 'complete' | 'truncated'>,
+  withheld: AnalyzerFinding[] = [],
 ): AnalyzerFinding[] {
-  Object.defineProperty(findings, COMPLETION, {
-    value: { ...status, complete: true },
-    enumerable: false,
-  })
-  return findings
+  return attachOutput(findings, { ...status, complete: true }, withheld)
 }
 
 export function analyzerResult(output: AnalyzerFinding[]): AnalyzerRunResult {
   const status = (output as FindingList)[COMPLETION]
   return { findings: output, complete: status?.complete ?? true, ...status }
+}
+
+/**
+ * Findings this pass produced and then removed from its own output to respect a
+ * finding cap. Empty for a pass that reported everything it found.
+ *
+ * Read by baseline/final comparisons only. Nothing renders or persists these —
+ * see `attachOutput` for why they exist at all.
+ */
+export function analyzerWithheld(output: AnalyzerFinding[]): AnalyzerFinding[] {
+  return (output as FindingList)[WITHHELD] ?? []
 }
 
 /**

@@ -19,6 +19,18 @@ const IGNORED_DIRS = new Set([
   '.git', 'node_modules', '.next', 'dist', 'build', 'out', 'coverage',
   '.venv', 'venv', '__pycache__', '.pytest_cache', 'vendor', 'target',
   '.turbo', '.cache', '.idea', '.vscode',
+  // CodeTruss's own receipt/audit store. A receipt `.patch` is the captured
+  // session diff — the full text of every changed line — and classifies as
+  // `source`, so its identifiers counted as repo-wide usage and silently
+  // suppressed genuine "exported with no consumer" findings, flickering on and
+  // off with whatever the last session happened to touch. Ignored like `.git`
+  // rather than disclosed as an exclusion: the store is CodeTruss's own
+  // metadata, gitignored by design, not committed product code. The CLI pins it
+  // under `.codetruss/` (config `receiptDir` rejects any relocation outside it),
+  // so the directory name is the whole surface to exclude. This is an analysis
+  // exclusion only — scope classification reads Git, not this walk, and already
+  // filters `.codetruss/` in git.ts.
+  '.codetruss',
 ])
 
 const DEFAULT_MAX_FILES = 20_000

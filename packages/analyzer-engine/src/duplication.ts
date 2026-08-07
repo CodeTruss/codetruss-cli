@@ -69,6 +69,9 @@ export const duplicationAnalyzer: Analyzer = {
 
     const findingLimit = 25
     const output = findings.slice(0, findingLimit)
+    // Retained unreported so a comparison against another run can tell a pair
+    // that was merely over the cap here from one that did not exist here.
+    const withheld = findings.slice(findingLimit)
     // Scanning fewer candidates is real coverage loss. Capping the number of
     // persisted duplicate pairs after every candidate was compared is only an
     // output bound and keeps the pass authoritative.
@@ -77,13 +80,13 @@ export const duplicationAnalyzer: Analyzer = {
         truncated: true,
         detail: `Duplication analysis hit a candidate bound (${candidates.length} candidate files, ${findings.length} matches).`,
         metrics: { candidates: candidates.length, candidateLimit, matches: findings.length, findingLimit },
-      })
+      }, withheld)
     }
     if (findings.length > findingLimit) {
       return annotatedAnalyzerOutput(output, {
         detail: `Duplication output capped at ${findingLimit} of ${findings.length} matches.`,
         metrics: { candidates: candidates.length, candidateLimit, matches: findings.length, findingLimit },
-      })
+      }, withheld)
     }
     return output
   },

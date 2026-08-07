@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { annotateSuppressions, runAnalyzers, type AnalyzerFinding, type AnalyzerPass, type IndexCoverage } from '@codetruss/analyzer-engine'
 import { CLI_SAST_UNCHECKED_CLASSES } from '@codetruss/analyzer-engine/security/local-profile'
 import { indexRepository } from './indexer.js'
-import { LOCAL_SAST_PASS_ID, runLocalSast } from './local-sast.js'
+import { LOCAL_SAST_PASS_ID, runLocalSast, type SastCoverageGap } from './local-sast.js'
 import { LOCAL_ANALYSIS_PROFILE, type ChangedFile, type Receipt, type VerificationResult, type Verdict, type LlmReview } from './types.js'
 
 export async function analyzeRepository(root: string) {
@@ -28,6 +28,17 @@ export async function analyzeRepository(root: string) {
     }))
     return {
       findings: passes.flatMap((pass) => pass.result.findings),
+      // What the analyzers found and then dropped to respect their own finding
+      // caps. Never rendered, never persisted — the cap still decides what a
+      // pass reports — but diffFindings compares against it so a finding that
+      // was merely hidden here is not called introduced over there. Suppression
+      // markers are read over these too: a finding can reach the receipt from
+      // beyond the cap through the delta, and a `codetruss-ignore` written
+      // beside it has to dismiss it when it does.
+      withheld: annotateSuppressions(result.withheld, index),
+      // Where this tree's security evidence is missing rather than clean. The
+      // delta needs it to know which files it may not speak about.
+      sastCoverageGap: localSast.coverageGap,
       passes,
       index,
     }
@@ -76,14 +87,80 @@ function isWorse(current: AnalyzerFinding, baseline: AnalyzerFinding): boolean {
   return severityRank[current.severity] > severityRank[baseline.severity] || current.impactScore > baseline.impactScore
 }
 
-/** Compare exact baseline and final analyzer results; only introduced/worsened findings gate the verdict. */
+/**
+ * Which security findings the delta has no basis to speak about, given where
+ * each tree's security evidence ran out.
+ *
+ * Scoped to the local security pass because these gaps describe that pass only;
+ * a deterministic analyzer's coverage is unaffected by a SAST time ceiling and
+ * must keep participating normally. When a run cut more files than it could
+ * name, no path list can identify the affected findings, so the whole pass stops
+ * being attributable rather than being filtered by an admittedly partial list.
+ */
+function securityCoverageFilter(
+  gaps: SastCoverageGap[],
+  files: ChangedFile[],
+): (finding: AnalyzerFinding) => boolean {
+  const unnamed = gaps.some((gap) => gap.incomplete)
+  const paths = new Set(gaps.flatMap((gap) => gap.paths).map(posixPath))
+  if (!unnamed && paths.size === 0) return () => false
+  return (finding) => {
+    if (finding.analyzerId !== LOCAL_SAST_PASS_ID) return false
+    if (unnamed) return true
+    if (!finding.filePath) return false
+    // Both spellings: a gap recorded in the baseline tree names a renamed file
+    // by its old path, and the same gap in the final tree by its new one.
+    return paths.has(posixPath(finding.filePath)) || paths.has(posixPath(normalizedFindingPath(finding.filePath, files)))
+  }
+}
+
+/**
+ * Compare exact baseline and final analyzer results; only introduced/worsened
+ * findings gate the verdict.
+ *
+ * Both sides are compared over everything the analyzers FOUND, not only what
+ * they reported. `withheld` carries the findings an analyzer's own output cap
+ * removed from its reported list, and leaving them out corrupts the delta in
+ * both directions. Resolve two findings and two cap slots free up: unrelated
+ * findings in files the author never opened enter the reported list for the
+ * first time, and without the baseline's withheld set they read as INTRODUCED —
+ * a signed receipt asserting a change did something it did not. Add findings and
+ * the pressure runs the other way: an unfixed finding pushed below the cap
+ * disappears from the reported list and reads as RESOLVED.
+ *
+ * A cap bounds what a pass reports about the whole repository. It must not
+ * decide what a change is said to have done, so the delta is computed over the
+ * complete sets and stays a statement about the change alone.
+ *
+ * `securityCoverageGaps` closes the same bug arriving through a different door.
+ * A wall-clock ceiling in the security pass hides findings the way an output cap
+ * does, but it hides them UNRECOVERABLY: the rules never ran, so there is no
+ * withheld set to compare against, and the tree's state in those files is
+ * unknown rather than clean. Unlike the node budget — which is a function of the
+ * file's own bytes, so it hides the same findings in both trees and cancels out
+ * — a clock does not fire identically twice. Cut a file in the baseline and not
+ * in the final and its long-standing findings appear on one side only, and the
+ * delta calls them introduced: a signed receipt asserting a change broke a file
+ * its author never opened. So a path either tree could not finish is dropped
+ * from BOTH sides and the delta simply makes no claim about it. That silence is
+ * covered: the pass is flagged truncated and its disclosure names the file.
+ */
 export function diffFindings(
   baseline: AnalyzerFinding[],
   final: AnalyzerFinding[],
   files: ChangedFile[] = [],
+  withheld: { baseline?: AnalyzerFinding[]; final?: AnalyzerFinding[] } = {},
+  securityCoverageGaps: SastCoverageGap[] = [],
 ): FindingDelta {
-  const before = new Map(baseline.map((finding) => [findingFingerprint(finding), finding]))
-  const after = new Map(final.map((finding) => [findingFingerprint(finding, files), finding]))
+  const unattributable = securityCoverageFilter(securityCoverageGaps, files)
+  // Reported findings are listed last so they win the fingerprint collision: a
+  // finding that is both reported and withheld should compare as the reported one.
+  const before = new Map([...withheld.baseline ?? [], ...baseline]
+    .filter((finding) => !unattributable(finding))
+    .map((finding) => [findingFingerprint(finding), finding]))
+  const after = new Map([...withheld.final ?? [], ...final]
+    .filter((finding) => !unattributable(finding))
+    .map((finding) => [findingFingerprint(finding, files), finding]))
   const introduced: AnalyzerFinding[] = []
   const worsened: AnalyzerFinding[] = []
   const recurring: AnalyzerFinding[] = []

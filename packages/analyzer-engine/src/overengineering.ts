@@ -249,12 +249,16 @@ export const overengineeringAnalyzer: Analyzer = {
       }
     }
 
-    const findings: AnalyzerFinding[] = []
     const findingLimit = 10
-    for (const file of speculative.slice(0, findingLimit)) {
+    // Every match is turned into a finding BEFORE the per-rule cap is applied.
+    // The cap then splits them into what this pass reports and what it withholds
+    // — a finding that only exists on one side of that split cannot be compared
+    // against another run, and an uncomparable finding is one a delta calls
+    // "introduced" the moment a cap slot frees up somewhere unrelated.
+    const speculativeFindings: AnalyzerFinding[] = speculative.map((file) => {
       const listed = file.names.slice(0, 5).map((name) => `\`${name}\``).join(', ')
       const rest = file.names.length - Math.min(file.names.length, 5)
-      findings.push({
+      return {
         category: 'DEAD_CODE',
         severity: 'INFO',
         title: `${file.names.length} export(s) with no consumer in ${file.path}`,
@@ -268,26 +272,33 @@ export const overengineeringAnalyzer: Analyzer = {
         impactScore: 15,
         effort: 'low',
         metadata: { exports: file.names.slice(0, 10) },
-      })
-    }
+      }
+    })
 
-    for (const file of rethrows.slice(0, findingLimit)) {
-      findings.push({
-        category: 'TECH_DEBT',
-        severity: 'INFO',
-        title: `${file.lines.length} catch block(s) log and rethrow in ${file.path}`,
-        description:
-          `${file.path} catches an error at line ${file.lines[0]}${file.lines.length > 1 ? ` and ${file.lines.length - 1} other place(s)` : ''}, `
-          + 'logs it, and rethrows it unchanged. The handler adds a duplicate log line and no behaviour: the caller '
-          + 'still receives the original error, and the stack is now reported twice.',
-        filePath: file.path,
-        line: file.lines[0],
-        suggestion: 'Remove the catch and let the error propagate, or handle it where the extra context exists.',
-        impactScore: 15,
-        effort: 'low',
-        metadata: { lines: file.lines.slice(0, 10) },
-      })
-    }
+    const rethrowFindings: AnalyzerFinding[] = rethrows.map((file) => ({
+      category: 'TECH_DEBT',
+      severity: 'INFO',
+      title: `${file.lines.length} catch block(s) log and rethrow in ${file.path}`,
+      description:
+        `${file.path} catches an error at line ${file.lines[0]}${file.lines.length > 1 ? ` and ${file.lines.length - 1} other place(s)` : ''}, `
+        + 'logs it, and rethrows it unchanged. The handler adds a duplicate log line and no behaviour: the caller '
+        + 'still receives the original error, and the stack is now reported twice.',
+      filePath: file.path,
+      line: file.lines[0],
+      suggestion: 'Remove the catch and let the error propagate, or handle it where the extra context exists.',
+      impactScore: 15,
+      effort: 'low',
+      metadata: { lines: file.lines.slice(0, 10) },
+    }))
+
+    const findings = [
+      ...speculativeFindings.slice(0, findingLimit),
+      ...rethrowFindings.slice(0, findingLimit),
+    ]
+    const withheld = [
+      ...speculativeFindings.slice(findingLimit),
+      ...rethrowFindings.slice(findingLimit),
+    ]
 
     // Only the candidate-file cap loses coverage; the finding cap bounds output
     // over an analysis that still examined every candidate.
@@ -304,13 +315,13 @@ export const overengineeringAnalyzer: Analyzer = {
         truncated: true,
         detail: `Speculative-structure analysis hit a candidate bound (${production.length} candidate files).`,
         metrics,
-      })
+      }, withheld)
     }
     if (speculative.length > findingLimit || rethrows.length > findingLimit) {
       return annotatedAnalyzerOutput(findings, {
         detail: `Speculative-structure output capped at ${findingLimit} files per rule (${speculative.length} export, ${rethrows.length} rethrow).`,
         metrics,
-      })
+      }, withheld)
     }
     return annotatedAnalyzerOutput(findings, { metrics })
   },

@@ -12,6 +12,21 @@ const VERIFICATION_OUTPUT_MARKER = Buffer.from('\n… output truncated …\n')
 const VERIFICATION_TERMINATION_GRACE_MS = 150
 
 /**
+ * How long a run keeps capturing after the command's own process has exited.
+ *
+ * A verification can leave a background process holding the stdio pipes it
+ * inherited, and those pipes are exactly what `close` waits for. Some of those
+ * processes cannot be terminated at all (see terminateVerificationProcessTree),
+ * so without a bound the run would wait out its entire deadline and report a
+ * timeout for a command that already finished — turning a passing suite into a
+ * failed receipt. The grace is only ever paid when something really did escape:
+ * a command that is the last holder of its own pipes closes in the same tick it
+ * exits. It is generous relative to the microseconds needed to drain the ≤64KB
+ * a dead writer can leave buffered, so it never truncates a command's own tail.
+ */
+const VERIFICATION_ESCAPED_OUTPUT_GRACE_MS = 2_000
+
+/**
  * Git's no-index implementation recognizes only the literal `nul` spelling
  * on native Windows. Node's `os.devNull` is `\\.\nul`, which Windows can open
  * but Git does not classify as its missing-file sentinel and can consequently
@@ -460,6 +475,18 @@ async function terminateVerificationProcessTree(child: ChildProcess): Promise<vo
     // process. The liveness check uses our own process handle and cannot be
     // misdirected; a leader exiting between this check and taskkill's own
     // snapshot is the same narrow race every taskkill user carries.
+    //
+    // KNOWN LIMIT — a descendant that outlives the leader is not reaped here,
+    // and cannot be. Windows does not reparent orphans, it only leaves a dead
+    // parent id behind, so once an intermediate ancestor exits the chain from
+    // this pid to that descendant is gone: there is nothing left to enumerate,
+    // and matching on the stale parent id would be pid-recycling roulette by
+    // another name. Containment that survives ancestor death is a kernel job
+    // object (KILL_ON_JOB_CLOSE), which Node exposes no API for — reaching one
+    // needs a native addon or a bundled helper binary, neither of which this
+    // CLI ships. The escape is instead bounded rather than prevented: see
+    // VERIFICATION_ESCAPED_OUTPUT_GRACE_MS, which stops such a process from
+    // holding the run open, and reports it in the receipt.
     if (child.exitCode !== null || child.signalCode !== null) return
     spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], {
       stdio: 'ignore',
@@ -495,6 +522,7 @@ export async function runVerification(
     const output = new BoundedVerificationOutput(maxBytes)
     let settled = false
     let cleanupPromise: Promise<void> | undefined
+    let escapeTimer: NodeJS.Timeout | undefined
 
     const cleanup = (): Promise<void> => {
       cleanupPromise ??= terminateVerificationProcessTree(child)
@@ -504,6 +532,7 @@ export async function runVerification(
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(escapeTimer)
       const captured = output.result(suffix)
       resolveResult({
         command,
@@ -517,6 +546,7 @@ export async function runVerification(
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(escapeTimer)
       void cleanup().finally(() => {
         child.stdout.destroy()
         child.stderr.destroy()
@@ -546,13 +576,23 @@ export async function runVerification(
     timer.unref()
 
     child.once('error', (error) => cleanupAndFinish(127, `${output.result().output ? '\n' : ''}${error.message}`))
-    child.once('exit', () => {
+    child.once('exit', (code) => {
       // A verification may fork a background process that keeps inherited
-      // pipes open. Terminate the whole isolated group before awaiting close,
-      // but retain the deadline until close: on Windows an already-exited
-      // leader may no longer be addressable by taskkill, and an escaped child
-      // must not make the CLI wait forever on its inherited pipe handles.
+      // pipes open. Terminate the whole isolated group before awaiting close.
       void cleanup()
+      // A process that escaped the group — POSIX: its own session; Windows:
+      // any descendant that outlived the leader taskkill enumerates from —
+      // survives that terminate and keeps `close` pending on the pipes it
+      // inherited. Waiting for it until the deadline would report a timeout
+      // for a command that already finished, so give the command's own output
+      // a bounded grace and then settle on the status it actually produced.
+      escapeTimer = setTimeout(() => {
+        cleanupAndFinish(
+          code ?? 1,
+          `${output.result().output ? '\n' : ''}CodeTruss stopped capturing ${VERIFICATION_ESCAPED_OUTPUT_GRACE_MS}ms after the command exited: a background process it left running still holds the output pipes, and CodeTruss could not terminate it.\n`,
+        )
+      }, VERIFICATION_ESCAPED_OUTPUT_GRACE_MS)
+      escapeTimer.unref()
     })
     child.once('close', (code) => {
       clearTimeout(timer)

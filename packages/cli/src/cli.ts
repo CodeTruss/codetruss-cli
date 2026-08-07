@@ -464,7 +464,15 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
 
     const baselineAnalysis = await analyzeRepository(baselineSnapshot.root)
     const analysis = await analyzeRepository(finalSnapshot.root)
-    const findingDelta = diffFindings(baselineAnalysis.findings, analysis.findings, files)
+    const findingDelta = diffFindings(
+      baselineAnalysis.findings,
+      analysis.findings,
+      files,
+      { baseline: baselineAnalysis.withheld, final: analysis.withheld },
+      // A file either tree could not finish analyzing is not evidence of
+      // anything, in either direction.
+      [baselineAnalysis.sastCoverageGap, analysis.sastCoverageGap],
+    )
     const relevantFindings = [...findingDelta.introduced, ...findingDelta.worsened]
     const baselineEvidenceIssues = analysisEvidenceIssues(baselineAnalysis.passes, baselineAnalysis.index.coverage)
     const finalEvidenceIssues = analysisEvidenceIssues(analysis.passes, analysis.index.coverage)

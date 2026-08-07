@@ -40,6 +40,10 @@ function verdictInput(findings: AnalyzerFinding[]) {
 function analysis(findings: AnalyzerFinding[]) {
   return {
     findings,
+    withheld: [],
+    // Dismissal bookkeeping is what these tests cover, so the scan they model is
+    // a complete one: no file went unanalyzed, and no finding here is unattributable.
+    sastCoverageGap: { paths: [], incomplete: false },
     passes: [{ id: 'secrets', result: { findings, complete: true } }],
     index: { totalLoc: 10, languages: { TypeScript: 10 }, primaryLanguage: 'TypeScript' } as unknown as RepoIndex,
   }
