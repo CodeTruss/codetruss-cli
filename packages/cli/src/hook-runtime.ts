@@ -4,7 +4,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { CliConfig } from './types.js'
 import { receiptDir } from './config.js'
 import { createExactSnapshotCommit, deleteLegacyHookBaseline, type ExactSnapshotCommit } from './hook-baseline.js'
+import { isWorkingTreeChangedError } from './git-snapshot.js'
 import { classifyPath, isDependencyFile, sensitiveCategory } from './policy.js'
+import { applyInferredScope, inferTurnScope } from './scope-inference.js'
 import { runGit, runGitText } from './git-process.js'
 import { runLocalCommand } from './local-command.js'
 import {
@@ -111,6 +113,7 @@ const MAX_SELECTOR_BYTES = 16 * 1024
 const MAX_STATE_BYTES = 256 * 1024
 const MAX_REVIEW_OUTPUT_CHARS = 6_000
 const REVIEW_TIMEOUT_MS = 5 * 60 * 1_000
+const MAX_EXACT_CAPTURE_ATTEMPTS = 3
 const STATE_VERSION_DIR = 'v2'
 const LEGACY_STATE_VERSION_DIR = 'v1'
 const PATH_KEY_HEX_CHARS = 24
@@ -156,6 +159,18 @@ function blockDecision(message: string): HookOutput {
 
 function systemMessage(message: string): HookOutput {
   return { systemMessage: message.slice(0, 10_000) }
+}
+
+/**
+ * Baseline capture is instrumentation, not a verdict. Blocking UserPromptSubmit
+ * fails closed against a *person*: their prompt is erased and they are told to
+ * try again, because CodeTruss could not take a snapshot. Never do that. Emit a
+ * note explaining the turn is unreceipted and let the prompt through — Stop
+ * remains the enforcement point, and it still fails closed when a turn reaches
+ * it without a provable baseline, so an agent cannot silently finish unreviewed.
+ */
+function captureNotice(message: string): HookOutput {
+  return systemMessage(message)
 }
 
 /**
@@ -1239,10 +1254,37 @@ function readableTask(prompt: string): string {
   return summary ? `[${tag}] ${summary}` : `[${tag}]`
 }
 
-function inputTask(input: HookInput): string | undefined {
+/**
+ * Agent harnesses deliver turns that carry no prompt at all: background-task
+ * notifications, hook feedback continuations, and resumed agents all reach
+ * UserPromptSubmit with an absent or empty `prompt` field. That is a legitimate
+ * turn shape, not malformed input — an exact baseline is a snapshot of the
+ * working tree, and the tree exists whether or not a human typed anything.
+ * Label those turns honestly and capture them like any other, so the turn still
+ * earns a receipt instead of stranding Stop without a baseline.
+ */
+const PROMPTLESS_TASK = '[no prompt] agent turn with no submitted prompt text'
+
+function inputTask(input: HookInput): string {
   const prompt = asNonEmptyString(input.prompt)
-  if (!prompt) return undefined
-  return asNonEmptyString(readableTask(prompt).slice(0, MAX_TASK_CHARS))
+  if (!prompt) return PROMPTLESS_TASK
+  return asNonEmptyString(readableTask(prompt).slice(0, MAX_TASK_CHARS)) ?? PROMPTLESS_TASK
+}
+
+async function captureExactSnapshot(
+  root: string,
+  snapshotParent: string,
+  objectStore: PrivateGitObjectStore,
+  capture: NonNullable<HookRuntimeDependencies['captureBaseline']>,
+): Promise<ExactSnapshotCommit> {
+  for (let attempt = 1; attempt <= MAX_EXACT_CAPTURE_ATTEMPTS; attempt++) {
+    try {
+      return await capture(root, snapshotParent, objectStore)
+    } catch (error) {
+      if (!isWorkingTreeChangedError(error) || attempt === MAX_EXACT_CAPTURE_ATTEMPTS) throw error
+    }
+  }
+  throw new Error('exact snapshot capture exhausted its retry bound')
 }
 
 type NamedLockName = 'capture.lock' | 'stop.lock' | 'migration.lock'
@@ -1378,18 +1420,17 @@ async function capturePromptBaseline(
 ): Promise<HookOutput | undefined> {
   const sessionId = asNonEmptyString(input.session_id)
   const task = inputTask(input)
-  if (!sessionId) return blockDecision('CodeTruss could not capture an exact turn baseline: hook input is missing session_id.')
-  if (!task) return blockDecision('CodeTruss could not capture an exact turn baseline: hook input is missing the submitted prompt.')
+  if (!sessionId) return captureNotice('CodeTruss could not capture an exact turn baseline: hook input is missing session_id.')
 
   let turnId: string | undefined
   try {
     turnId = inputTurnId(input)
   } catch (error) {
-    return blockDecision(`CodeTruss could not capture an exact turn baseline: ${safeError(error)}.`)
+    return captureNotice(`CodeTruss could not capture an exact turn baseline: ${safeError(error)}.`)
   }
   const prepared = await gitStateRoot(root, surface, sessionId)
   if (prepared.legacyBlockReason) {
-    return blockDecision(`CodeTruss could not safely migrate private hook evidence: ${prepared.legacyBlockReason}.`)
+    return captureNotice(`CodeTruss could not safely migrate private hook evidence: ${prepared.legacyBlockReason}.`)
   }
   const base = prepared.base
   const sessionDir = sessionStateDir(base, surface, sessionId)
@@ -1403,7 +1444,7 @@ async function capturePromptBaseline(
   await ensurePrivateDirectory(turnDir)
   const now = dependencies.now?.() ?? new Date()
   const lock = await acquireNamedLock(turnDir, 'capture.lock', now)
-  if (!lock) return blockDecision('CodeTruss exact baseline capture is already running for this agent turn.')
+  if (!lock) return captureNotice('CodeTruss exact baseline capture is already running for this agent turn.')
   try {
     const contextPath = turnContextPath(turnDir)
     const storePath = turnObjectStorePath(turnDir)
@@ -1411,14 +1452,14 @@ async function capturePromptBaseline(
     try {
       existing = await readBoundedRegularJson<HookState>(statePath, MAX_STATE_BYTES)
     } catch (error) {
-      return blockDecision(`CodeTruss refused to replace unsafe or invalid existing turn state: ${safeError(error)}.`)
+      return captureNotice(`CodeTruss refused to replace unsafe or invalid existing turn state: ${safeError(error)}.`)
     }
     if (existing && (!exactStateIdentity(existing, surface, hash(sessionId), [turnKey], prepared.worktreeIdentity)
       || existing.turnId !== turnId)) {
-      return blockDecision('CodeTruss refused to replace hook evidence whose session, surface, turn, or stable Git worktree ownership cannot be proven.')
+      return captureNotice('CodeTruss refused to replace hook evidence whose session, surface, turn, or stable Git worktree ownership cannot be proven.')
     }
     if (existing && existing.taskHash !== hash(task)) {
-      return blockDecision('CodeTruss refused to reuse exact turn evidence for a different prompt task.')
+      return captureNotice('CodeTruss refused to reuse exact turn evidence for a different prompt task.')
     }
     if (exactStateIdentity(existing, surface, hash(sessionId), [turnKey], prepared.worktreeIdentity)
       && existing.turnId === turnId && existing.status === 'ready' && existing.objectStoreVersion === 1
@@ -1427,7 +1468,7 @@ async function capturePromptBaseline(
         await openPrivateGitObjectStore(root, storePath)
         const context = await readHookTurnContext(contextPath, existing.contextSha256)
         if (context.task !== task || existing.taskHash !== hash(context.task)) {
-          return blockDecision('CodeTruss refused to reuse an exact baseline for a different prompt task.')
+          return captureNotice('CodeTruss refused to reuse an exact baseline for a different prompt task.')
         }
         await writePrivateJson(currentPath, { version: 1, turnKey, ...(turnId ? { turnId } : {}) } satisfies CurrentTurn)
         return undefined
@@ -1457,7 +1498,12 @@ async function capturePromptBaseline(
     let objectStore: PrivateGitObjectStore | undefined
     try {
       objectStore = await initializePrivateGitObjectStore(root, storePath)
-      const baseline = await (dependencies.captureBaseline ?? createExactSnapshotCommit)(root, join(turnDir, 's'), objectStore)
+      const baseline = await captureExactSnapshot(
+        root,
+        join(turnDir, 's'),
+        objectStore,
+        dependencies.captureBaseline ?? createExactSnapshotCommit,
+      )
       const context: HookTurnContext = {
         version: 1,
         surface,
@@ -1492,7 +1538,7 @@ async function capturePromptBaseline(
         error: message,
         updatedAt: (dependencies.now?.() ?? new Date()).toISOString(),
       } satisfies HookState)
-      return blockDecision(message)
+      return captureNotice(message)
     }
   } finally {
     await releaseNamedLock(lock)
@@ -1584,15 +1630,27 @@ async function fastPathFeedback(
   const normalized = rawPaths.map((path) => normalizeHookPath(root, cwd, path))
   const outside = [...new Set(normalized.flatMap((item) => item.outside ? [item.outside] : []))]
   const paths = [...new Set(normalized.flatMap((item) => item.path ? [item.path] : []))].sort()
+  const observed = paths.map((path) => ({
+    path,
+    classification: classifyPath(path, undefined, config.allow, config.deny),
+    sensitive: sensitiveCategory(path),
+    dependency: isDependencyFile(path),
+  }))
+  // This check sees only the paths in one tool call, so it can infer strictly
+  // less than the Stop-time receipt — never more. A path it still calls out may
+  // yet be in scope by inference once the whole turn is visible, which is what
+  // the closing line about the full receipt already says. Staying quiet about a
+  // path inference has already covered is what keeps a first session readable;
+  // the receipt, not this line, is where inference is disclosed.
+  const { files: checked } = applyInferredScope(observed, inferTurnScope({
+    task: '', files: observed, allow: config.allow, deny: config.deny,
+  }))
   const warnings: string[] = []
-  for (const path of paths) {
-    const classification = classifyPath(path, undefined, config.allow, config.deny)
-    const sensitive = sensitiveCategory(path)
-    const dependency = isDependencyFile(path)
-    if (classification === 'denied') warnings.push(`${path}: denied by the task scope`)
-    else if (classification === 'unexpected') warnings.push(`${path}: outside the allowed task scope`)
-    if (sensitive) warnings.push(`${path}: sensitive ${sensitive} surface`)
-    if (dependency) warnings.push(`${path}: dependency or lockfile surface`)
+  for (const file of checked) {
+    if (file.classification === 'denied') warnings.push(`${file.path}: denied by the task scope`)
+    else if (file.classification === 'unexpected') warnings.push(`${file.path}: outside the allowed task scope`)
+    if (file.sensitive) warnings.push(`${file.path}: sensitive ${file.sensitive} surface`)
+    if (file.dependency) warnings.push(`${file.path}: dependency or lockfile surface`)
   }
   for (const path of outside) warnings.push(`${path}: resolves outside the repository`)
   if (warnings.length === 0) return undefined
@@ -1651,6 +1709,8 @@ interface HookReviewResultDocument {
   verdict: 'PASS' | 'REVIEW_REQUIRED' | 'FAILED'
   receiptPath: string
   reasons: string[]
+  /** Optional: absent from every result written before fix suggestions existed. */
+  suggestion?: string
 }
 
 function isContainedPath(parent: string, candidate: string): boolean {
@@ -1661,7 +1721,13 @@ function isContainedPath(parent: string, candidate: string): boolean {
 function exactReviewResultDocument(value: unknown, attemptId: string): value is HookReviewResultDocument {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const document = value as Record<string, unknown>
-  return Object.keys(document).sort().join(',') === 'attemptId,reasons,receiptPath,verdict,version'
+  // Two exact key sets, not a loose superset: a result carrying a suggestion,
+  // and one written by a CLI that predates them. Anything else is rejected.
+  const keys = Object.keys(document).sort().join(',')
+  return (keys === 'attemptId,reasons,receiptPath,verdict,version'
+    || keys === 'attemptId,reasons,receiptPath,suggestion,verdict,version')
+    && (document.suggestion === undefined
+      || (typeof document.suggestion === 'string' && document.suggestion.length > 0 && document.suggestion.length <= 2_000))
     && document.version === 1
     && document.attemptId === attemptId
     && /^[0-9a-f]{64}$/.test(document.attemptId)
@@ -1793,7 +1859,10 @@ async function reviewSummary(
     }
   }
   const reasons = document.reasons.slice(0, 5).map((reason) => `- ${reason}`).join('\n')
-  const message = `CodeTruss ${document.verdict}. Receipt: ${document.receiptPath}${reasons ? `\n${reasons}` : ''}`
+  // The suggestion follows the reasons and is never subject to their display
+  // cap: it is the one line the agent can act on before a person reads this.
+  const suggestion = document.suggestion ? `\n${document.suggestion}` : ''
+  const message = `CodeTruss ${document.verdict}. Receipt: ${document.receiptPath}${reasons ? `\n${reasons}` : ''}${suggestion}`
   return {
     verdict: document.verdict,
     receiptPath: document.receiptPath,
@@ -1997,7 +2066,12 @@ async function reviewAtStop(
         if (state.finalCommit || state.finalHead || state.reviewAttemptId) {
           throw new Error('ready hook state contains an unexpected partial final review identity')
         }
-        const final = await (dependencies.captureBaseline ?? createExactSnapshotCommit)(root, join(turnDir, 'f'), objectStore)
+        const final = await captureExactSnapshot(
+          root,
+          join(turnDir, 'f'),
+          objectStore,
+          dependencies.captureBaseline ?? createExactSnapshotCommit,
+        )
         objectStore.assertObjectId(final.commit, 'final snapshot commit')
         finalCommit = final.commit
         finalHead = final.head

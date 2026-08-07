@@ -3,7 +3,7 @@ import { lstat, readdir, readlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { dirtyFiles, head } from './git.js'
-import { materializeWorkingTreeSnapshot } from './git-snapshot.js'
+import { materializeWorkingTreeSnapshot, WorkingTreeChangedError } from './git-snapshot.js'
 import { gitCommandArguments, runGit, runGitText } from './git-process.js'
 import type { PrivateGitObjectStore } from './private-git-object-store.js'
 
@@ -138,12 +138,12 @@ function assertGitCaptureState(
   expectedDirtyFiles: readonly string[],
   expectedGitlinks: Map<string, string>,
 ): void {
-  if (head(repoRoot) !== expectedHead) throw new Error('HEAD changed while the hook baseline was being captured')
+  if (head(repoRoot) !== expectedHead) throw new WorkingTreeChangedError('HEAD')
   if (JSON.stringify(dirtyFiles(repoRoot)) !== JSON.stringify(expectedDirtyFiles)) {
-    throw new Error('Git status changed while the hook baseline was being captured')
+    throw new WorkingTreeChangedError('Git status')
   }
   if (!mapsEqual(resolvedGitlinks(repoRoot), expectedGitlinks)) {
-    throw new Error('Gitlink state changed while the hook baseline was being captured')
+    throw new WorkingTreeChangedError('Gitlink state')
   }
 }
 

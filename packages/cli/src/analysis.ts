@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { runAnalyzers, type AnalyzerFinding, type AnalyzerPass, type IndexCoverage } from '@codetruss/analyzer-engine'
+import { CLI_SAST_UNCHECKED_CLASSES } from '@codetruss/analyzer-engine/security/local-profile'
 import { indexRepository } from './indexer.js'
+import { LOCAL_SAST_PASS_ID, runLocalSast } from './local-sast.js'
 import { LOCAL_ANALYSIS_PROFILE, type ChangedFile, type Receipt, type VerificationResult, type Verdict, type LlmReview } from './types.js'
 
 export async function analyzeRepository(root: string) {
@@ -8,11 +10,19 @@ export async function analyzeRepository(root: string) {
   const priorOffline = process.env.CODETRUSS_OFFLINE
   process.env.CODETRUSS_OFFLINE = '1'
   try {
-    // LOCAL_ANALYSIS_PROFILE omits the SAST pass. Declaring it here is what
-    // makes the coverage analyzer disclose the gap instead of inheriting the
-    // hosted premise that TypeScript/JavaScript/Python were security-reviewed.
-    const result = await runAnalyzers(index, { sast: false })
-    return { ...result, index }
+    // The local security pass runs a validated SUBSET of the rule pack, so the
+    // coverage analyzer is told both facts: the pass ran, AND which classes it
+    // still did not check. Claiming either half alone would mislead.
+    const result = await runAnalyzers(index, {
+      sast: true,
+      sastUncheckedClasses: CLI_SAST_UNCHECKED_CLASSES,
+    })
+    const localSast = await runLocalSast(index)
+    return {
+      findings: [...result.findings, ...localSast.findings],
+      passes: [...result.passes, localSast.pass],
+      index,
+    }
   } finally {
     if (priorOffline === undefined) delete process.env.CODETRUSS_OFFLINE
     else process.env.CODETRUSS_OFFLINE = priorOffline
@@ -160,10 +170,15 @@ export function analysisCoverageNotes(coverage: IndexCoverage | undefined): stri
   return coverageLimitations(coverage)
 }
 
+/** Separator-agnostic so a Windows-shaped path never fails to match its POSIX twin. */
+function posixPath(path: string): string {
+  return path.replaceAll('\\', '/').replace(/^\.\//, '')
+}
+
 export function changedFindings(findings: AnalyzerFinding[], files: ChangedFile[]): AnalyzerFinding[] {
-  const changed = new Set(files.flatMap((file) => [file.path, file.oldPath].filter(Boolean) as string[]))
+  const changed = new Set((files.flatMap((file) => [file.path, file.oldPath].filter(Boolean) as string[])).map(posixPath))
   return findings.filter((finding) => {
-    const filePath = finding.filePath
+    const filePath = finding.filePath ? posixPath(finding.filePath) : undefined
     return Boolean(filePath && [...changed].some((path) => filePath === path || filePath.startsWith(`${path}/`) || path.startsWith(`${filePath}/`)))
   })
 }
@@ -187,10 +202,32 @@ export function computeVerdict(input: {
   for (const issue of input.baselineEvidenceIssues ?? []) review.push(`baseline evidence limitation resolved in the final tree: ${issue}`)
   for (const issue of input.advisoryEvidenceIssues ?? []) review.push(`index coverage was partial but authoritative: ${issue}`)
   for (const verification of input.verifications.filter((item) => item.exitCode !== 0)) failed.push(`verification command failed: ${verification.command}`)
-  const blocking = input.findings.filter((finding) => severityRank[finding.severity] >= severityRank.HIGH && (finding.category === 'SECURITY_HYGIENE' || finding.category === 'DEPENDENCY'))
+  /**
+   * The local security pass reports; it does not block — yet.
+   *
+   * Its findings land in SECURITY_HYGIENE at HIGH/CRITICAL, which the rule below
+   * would otherwise turn into FAILED, and a FAILED verdict at `Stop` halts the
+   * developer's agent mid-turn. One false positive doing that is how a security
+   * tool gets uninstalled, so this pass surfaces as REVIEW_REQUIRED on its first
+   * release. Precision earns the right to block after real-repo soak; severity
+   * does not grant it. Promotion is a deliberate later change, not a default.
+   */
+  const isLocalSast = (finding: AnalyzerFinding) => finding.analyzerId === LOCAL_SAST_PASS_ID
+  const blocking = input.findings.filter(
+    (finding) =>
+      severityRank[finding.severity] >= severityRank.HIGH &&
+      (finding.category === 'SECURITY_HYGIENE' || finding.category === 'DEPENDENCY') &&
+      !isLocalSast(finding),
+  )
   if (blocking.length) failed.push(`${blocking.length} high/critical security or dependency finding(s) affect changed files`)
+  const localSastFindings = input.findings.filter(isLocalSast)
+  if (localSastFindings.length) {
+    const rules = [...new Set(localSastFindings.map((finding) => String(finding.metadata?.ruleId ?? 'security')))].sort()
+    review.push(`${localSastFindings.length} local security finding(s) affect changed files (${rules.join(', ')})`)
+  }
   const denied = input.files.filter((file) => file.classification === 'denied')
   const unexpected = input.files.filter((file) => file.classification === 'unexpected')
+  const inferred = input.files.filter((file) => file.classification === 'inferred')
   const sensitive = input.files.filter((file) => file.sensitive)
   const deps = input.files.filter((file) => file.dependency)
   if (denied.length) review.push(`${denied.length} file(s) changed in denied paths: ${denied.slice(0, 5).map((file) => file.path).join(', ')}`)
@@ -198,7 +235,9 @@ export function computeVerdict(input: {
   if (sensitive.length) review.push(`sensitive surfaces changed: ${sensitive.slice(0, 5).map((file) => `${file.path} (${file.sensitive})`).join(', ')}`)
   if (deps.length) review.push(`dependency manifests or lockfiles changed: ${deps.slice(0, 5).map((file) => file.path).join(', ')}`)
   if (input.startDirty) review.push('the working tree was dirty at session start, so exact agent attribution is uncertain')
-  const reviewFindings = input.findings.filter((finding) => severityRank[finding.severity] >= severityRank.MEDIUM && !blocking.includes(finding))
+  const reviewFindings = input.findings.filter(
+    (finding) => severityRank[finding.severity] >= severityRank.MEDIUM && !blocking.includes(finding) && !isLocalSast(finding),
+  )
   if (reviewFindings.length) review.push(`${reviewFindings.length} medium-or-higher analyzer finding(s) affect changed files`)
   if (input.llm?.diffCoverage?.truncated) {
     review.push(`local ${input.llm.provider} review covered ${input.llm.diffCoverage.reviewedBytes} of ${input.llm.diffCoverage.totalBytes} diff bytes`)
@@ -207,7 +246,14 @@ export function computeVerdict(input: {
   if (!input.verifications.length) notes.push('no verification commands were configured')
   else if (!input.verifications.some((item) => item.exitCode !== 0)) notes.push(`all ${input.verifications.length} verification command(s) passed`)
   if (!input.files.length) notes.push('no repository files changed')
-  else if (!denied.length && !unexpected.length) notes.push(`all ${input.files.length} changed file(s) are within approved scope`)
+  // Scope reached by inference is in scope, but it is not scope the repository
+  // approved. Saying "all files are within approved scope" over it would be the
+  // one wrong sentence on an otherwise honest receipt.
+  else if (!denied.length && !unexpected.length) {
+    notes.push(inferred.length
+      ? `${input.files.length - inferred.length} changed file(s) are within approved scope; ${inferred.length} more matched scope inferred from this turn and disclosed on the receipt`
+      : `all ${input.files.length} changed file(s) are within approved scope`)
+  }
   if (failed.length) return { verdict: 'FAILED', reasons: [...failed, ...review] }
   if (review.length) return { verdict: 'REVIEW_REQUIRED', reasons: review }
   return { verdict: 'PASS', reasons: notes }

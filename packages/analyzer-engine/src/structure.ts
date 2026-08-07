@@ -1,4 +1,6 @@
-import type { Analyzer, AnalyzerFinding } from './types'
+import { nodePackageManager } from './detect'
+import { ciWorkflowFix, readmeStarterFix } from './fixes'
+import type { Analyzer, AnalyzerFinding, RepoIndex } from './types'
 
 /**
  * Code-file count above which cross-file views (knowledge graph, duplication)
@@ -6,6 +8,23 @@ import type { Analyzer, AnalyzerFinding } from './types'
  * sample. Comfortably below the graph's node cap in file terms.
  */
 const LARGE_REPO_CODE_FILES = 1500
+
+/** Install command per Node package manager, for the README quick start. */
+const INSTALL_COMMAND = { pnpm: 'pnpm install', yarn: 'yarn install', npm: 'npm install', bun: 'bun install' } as const
+
+/** CI steps worth generating, in the order a pipeline should run them. */
+const CI_SCRIPT_ORDER = ['lint', 'build', 'test'] as const
+
+function rootPackageJson(index: RepoIndex): Record<string, unknown> | undefined {
+  const raw = index.files.find((file) => file.path === 'package.json')?.content
+  if (!raw) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /** Project structure & hygiene: missing README, tests, CI, licenses, huge dirs. */
 export const structureAnalyzer: Analyzer = {
@@ -16,6 +35,8 @@ export const structureAnalyzer: Analyzer = {
     const findings: AnalyzerFinding[] = []
     const paths = index.files.map((f) => f.path)
     const has = (test: (p: string) => boolean) => paths.some(test)
+    const manager = nodePackageManager(index.files)
+    const packageJson = rootPackageJson(index)
 
     if (!has((p) => /^readme(\.md|\.rst|\.txt)?$/i.test(p))) {
       findings.push({
@@ -24,18 +45,39 @@ export const structureAnalyzer: Analyzer = {
         title: 'Missing README',
         description: 'The repository has no root README. New contributors and clients have no entry point to understand the project.',
         suggestion: 'Add a README covering purpose, setup, environment variables, and deployment.',
+        // The declared package name, never the directory name: analyzers run
+        // against materialized snapshots whose directory is a temporary id.
+        fix: readmeStarterFix({
+          projectName: typeof packageJson?.name === 'string' && packageJson.name.trim() ? packageJson.name.trim() : 'Project',
+          installCommand: manager ? INSTALL_COMMAND[manager] : undefined,
+        }),
         impactScore: 60,
         effort: 'low',
       })
     }
 
     if (!has((p) => p.startsWith('.github/workflows/') || p.includes('.gitlab-ci') || p.includes('.circleci'))) {
+      // A starter workflow only where the repository names the commands it
+      // would run. Inventing `npm test` for a project with no test script
+      // ships a pipeline that fails on its first run.
+      const scripts = packageJson?.scripts && typeof packageJson.scripts === 'object'
+        ? packageJson.scripts as Record<string, unknown>
+        : {}
+      const fix = manager
+        ? ciWorkflowFix({
+            manager,
+            hasLockfile: has((p) => ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'bun.lockb', 'bun.lock'].includes(p)),
+            hasPackageManagerField: typeof packageJson?.packageManager === 'string',
+            scripts: CI_SCRIPT_ORDER.filter((script) => typeof scripts[script] === 'string'),
+          })
+        : undefined
       findings.push({
         category: 'STRUCTURE',
         severity: 'MEDIUM',
         title: 'No CI pipeline detected',
         description: 'No GitHub Actions, GitLab CI, or CircleCI configuration found. Changes are not automatically built or tested.',
         suggestion: 'Add a CI workflow that installs dependencies, builds, and runs tests on every pull request.',
+        ...(fix ? { fix } : {}),
         impactScore: 65,
         effort: 'medium',
       })
@@ -114,19 +156,27 @@ export const structureAnalyzer: Analyzer = {
       .filter((f) => f.kind === 'generated')
       .reduce((total, f) => total + (f.sizeBytes ?? 0), 0)
     const generatedKb = Math.round(generatedBytes / 1024)
-    if (generatedPaths.length > 0 && (generatedLoc >= 500 || generatedBytes >= 50_000)) {
+    // No size gate: an exclusion the reader never sees is a silent one, and a
+    // four-line "generated" stub is exactly where a hidden change hides best.
+    // Every excluded path is named, so nothing is skipped off the record.
+    if (generatedPaths.length > 0) {
       const plural = generatedPaths.length > 1
-      const volume = `~${generatedLoc.toLocaleString()} LOC, ${generatedKb.toLocaleString()} KB`
+      // KB understates a four-line stub as "0 KB"; bytes understates a 375KB
+      // bundle. Report each in the unit that does not lie about it.
+      const size = generatedBytes >= 1024
+        ? `${generatedKb.toLocaleString()} KB`
+        : `${generatedBytes.toLocaleString()} bytes`
+      const volume = `~${generatedLoc.toLocaleString()} LOC, ${size}`
       findings.push({
         category: 'STRUCTURE',
         severity: 'LOW',
-        title: `Generated code excluded from analysis (${generatedPaths.length} file${plural ? 's' : ''}, ${generatedKb.toLocaleString()} KB)`,
-        description: `CodeTruss detected ${generatedPaths.length} machine-generated or minified file${plural ? 's' : ''} (${volume}, e.g. \`${generatedPaths[0]}\`) and excluded ${plural ? 'them' : 'it'} from LOC totals, scores, and the architecture graph so ${plural ? 'they' : 'it'} don't inflate metrics or produce spurious "oversized file" / "duplicated logic" findings. Minified bundles report few lines for their size, so the KB figure is the honest measure of what was skipped.`,
+        title: `Generated code excluded from analysis (${generatedPaths.length} file${plural ? 's' : ''}, ${size})`,
+        description: `CodeTruss detected ${generatedPaths.length} machine-generated or minified file${plural ? 's' : ''} (${volume}) and excluded ${plural ? 'them' : 'it'} from LOC totals, scores, and the architecture graph so ${plural ? "they don't" : "it doesn't"} inflate metrics or produce spurious "oversized file" / "duplicated logic" findings. Secret scanning still reads ${plural ? 'them' : 'it'} in full — a committed credential is reported wherever it lives. Excluded: ${generatedPaths.map((path) => `\`${path}\``).join(', ')}. Minified bundles report few lines for their size, so the byte figure is the honest measure of what was skipped.`,
         filePath: generatedPaths[0],
         suggestion: 'Keep generated and vendored bundles out of review scope — regenerate them at build time, or mark them linguist-generated in .gitattributes.',
         impactScore: 20,
         effort: 'low',
-        metadata: { files: generatedPaths.length, loc: generatedLoc, bytes: generatedBytes },
+        metadata: { files: generatedPaths.length, loc: generatedLoc, bytes: generatedBytes, paths: generatedPaths },
       })
     }
 

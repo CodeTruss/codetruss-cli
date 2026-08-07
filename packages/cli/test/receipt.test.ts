@@ -27,6 +27,20 @@ function fixture(root: string, patch = 'diff evidence'): Receipt {
   }
 }
 
+/** A receipt as CLI <= 0.2.34 signed it, when no security pass ran locally. */
+function profileV1Fixture(root: string, patch = 'diff evidence'): Receipt {
+  const receipt = fixture(root, patch)
+  return {
+    ...receipt,
+    analyzers: {
+      passes: receipt.analyzers.passes,
+      findings: receipt.analyzers.findings,
+      index: receipt.analyzers.index,
+      analysisProfile: { id: 'local-registry-v1', omittedPasses: ['graph', 'sast'], scoreStatus: 'not-computed' },
+    },
+  }
+}
+
 function legacyFixture(root: string, patch = 'diff evidence'): Receipt {
   const receipt = fixture(root, patch)
   return {
@@ -58,7 +72,7 @@ describe('signed receipts', () => {
     await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
     const markdown = await readFile(paths.markdown, 'utf8')
     expect(markdown).toContain('Policy SHA-256')
-    expect(markdown).toContain('Profile: `local-registry-v1`')
+    expect(markdown).toContain('Profile: `local-registry-v2`')
     expect(markdown).not.toContain('Final scores:')
     await writeFile(paths.markdown, `${await readFile(paths.markdown, 'utf8')}tampered`)
     await expect(verifyReceipt(dir, receipt.sessionId)).rejects.toThrow('Markdown receipt does not match')
@@ -85,21 +99,44 @@ describe('signed receipts', () => {
     expect(renderMarkdown(verified)).not.toContain('security 100')
   })
 
-  it('names the omitted passes as detection gaps rather than a missing score', () => {
+  it('names both what the local security pass checked and what it still did not', () => {
     const markdown = renderMarkdown(fixture('/tmp/repo'))
+    const checked = markdown.slice(
+      markdown.indexOf('### What the local security pass checked'),
+      markdown.indexOf('### What did not run'),
+    )
     const disclosure = markdown.slice(markdown.indexOf('### What did not run'))
 
-    expect(markdown).toContain('### What did not run')
-    // The gap a developer must not misread: injection was never examined.
-    expect(disclosure).toContain('**Security static analysis (SAST).**')
-    expect(disclosure).toMatch(/SQL injection.*command injection.*path traversal/)
-    expect(disclosure).toContain('says nothing either way about those classes')
+    // Claiming coverage is only honest next to its own boundary.
+    expect(checked).toContain('SQL injection')
+    expect(checked).toContain('Mass assignment')
+    expect(disclosure).toContain('**The rest of the security rule pack.**')
+    expect(disclosure).toMatch(/Command injection.*path traversal.*SSRF/)
+    expect(disclosure).toContain('means they were not analyzed, not that the code is clean')
+    expect(disclosure).toContain('**Non-JavaScript languages.**')
     expect(disclosure).toContain('**Hosted symbol graph.**')
     expect(disclosure).toContain('**Optional LLM review.**')
     expect(disclosure).toContain('force-disabled under agent hooks')
+    // The carve-out is stated where a reader will look for it.
+    expect(markdown).toContain('do not fail the verdict on their own')
     // Never an accusation: the receipt reports what ran, not a verdict on the code.
     expect(disclosure).not.toMatch(/vulnerab|insecure code|unsafe/i)
     expect(markdown).toContain('It is not a statement that this change is secure.')
+  })
+
+  it('reproduces the v1 wording for a receipt signed before SAST ran locally', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-profile-v1-receipt-'))
+    const dir = join(root, 'receipts')
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const receipt = profileV1Fixture(root)
+    const paths = await writeReceipt(dir, receipt, 'diff evidence')
+
+    const markdown = await readFile(paths.markdown, 'utf8')
+    expect(markdown).toContain('Profile: `local-registry-v1`')
+    // The claim that execution actually made, not the one the current CLI makes.
+    expect(markdown).toContain('**Security static analysis (SAST).**')
+    expect(markdown).not.toContain('### What the local security pass checked')
+    await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
   })
 
   it('does not list the LLM review as omitted when a model actually reviewed the diff', () => {
@@ -119,7 +156,7 @@ describe('signed receipts', () => {
     const root = await mkdtemp(join(tmpdir(), 'codetruss-prior-profile-receipt-'))
     const dir = join(root, 'receipts')
     process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
-    const receipt = fixture(root)
+    const receipt = profileV1Fixture(root)
     const paths = await writeReceipt(dir, receipt, 'diff evidence')
     const priorMarkdown = renderPriorProfileMarkdown(receipt)
     receipt.evidence.markdownSha256 = sha256(priorMarkdown)
@@ -132,6 +169,34 @@ describe('signed receipts', () => {
     expect(priorMarkdown).toContain('Hosted Health scores: **N/A**.')
     expect(priorMarkdown).not.toContain('### What did not run')
     await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
+  })
+
+  it('still verifies a 0.2.30 receipt after the generated-exclusion disclosure is reworded', async () => {
+    // Receipt Markdown is signed, and verifyReceipt only accepts renderings it
+    // can reproduce. Analyzer wording is safe to change ONLY because it is
+    // carried in the signed JSON rather than re-derived at render time — this
+    // pins that. A receipt written by 0.2.30 with the superseded
+    // "e.g. <first file>" disclosure must keep verifying byte-for-byte.
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-generated-disclosure-receipt-'))
+    const dir = join(root, 'receipts')
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const receipt = fixture(root)
+    receipt.analyzers.findings = [{
+      category: 'STRUCTURE',
+      severity: 'LOW',
+      analyzerId: 'structure',
+      title: 'Generated code excluded from analysis (2 files, 448 KB)',
+      description: 'CodeTruss detected 2 machine-generated or minified files (~22 LOC, 448 KB, e.g. `static/js/ace.js`) and excluded them from LOC totals, scores, and the architecture graph.',
+      filePath: 'static/js/ace.js',
+      impactScore: 20,
+      effort: 'low',
+    }]
+
+    await writeReceipt(dir, receipt, 'diff evidence')
+
+    await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
+    const markdown = await readFile(join(dir, `${receipt.sessionId}.md`), 'utf8')
+    expect(markdown).toContain('Generated code excluded from analysis (2 files, 448 KB)')
   })
 
   it('renders explicit optional LLM diff coverage', () => {
@@ -150,6 +215,75 @@ describe('signed receipts', () => {
     const preProvenance = structuredClone(current)
     delete preProvenance.invocation
     expect(renderMarkdown(current)).toBe(renderMarkdown(preProvenance))
+  })
+
+  it('discloses inferred scope as inferred, names what it was read from, and still verifies', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-inferred-scope-'))
+    const dir = join(root, 'receipts')
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const receipt = fixture(root)
+    receipt.scope = {
+      allow: ['lib/**'],
+      deny: [],
+      inferred: [{ root: 'src/auth', basis: 'working-set', evidence: ['src/auth/reset.ts', 'src/auth/tokens.ts'] }],
+    }
+    receipt.files = [
+      { path: 'src/auth/reset.ts', change: 'added', classification: 'inferred', dependency: false, additions: 9, deletions: 0 },
+      { path: 'src/auth/tokens.ts', change: 'modified', classification: 'inferred', dependency: false, additions: 2, deletions: 1 },
+    ]
+    await writeReceipt(dir, receipt, 'diff evidence')
+    const markdown = renderMarkdown(receipt)
+
+    // The changed-file row must never read as plainly approved scope.
+    expect(markdown).toContain('| `src/auth/reset.ts` | added | allowed (inferred) |')
+    expect(markdown).toContain('## Inferred scope (1)')
+    expect(markdown).toContain('2 changed file(s) matched no approved allow root.')
+    expect(markdown).toContain('| `src/auth` | working set for this turn | `src/auth/reset.ts`, `src/auth/tokens.ts` |')
+    expect(markdown).toContain('applied them to this turn only')
+    expect(markdown).toContain('were not written to `.codetruss.yml`')
+    expect(markdown).toContain('Approved allow roots: `lib/**`.')
+    expect(markdown).toContain('Denied paths, sensitive surfaces, and dependency manifests are never inferable.')
+    await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
+  })
+
+  it('says the scope was inferred entirely when the repository approved no roots', () => {
+    const receipt = fixture('/tmp/repo')
+    receipt.scope = {
+      allow: [],
+      deny: [],
+      inferred: [{ root: 'server/handlers', basis: 'task-reference', evidence: ['password reset'] }],
+    }
+    receipt.files = [{
+      path: 'server/handlers/reset.ts', change: 'added', classification: 'inferred', dependency: false, additions: 9, deletions: 0,
+    }]
+
+    const markdown = renderMarkdown(receipt)
+
+    expect(markdown).toContain('This repository has no approved allow roots, so its scope for this turn was inferred entirely.')
+    expect(markdown).toContain('| `server/handlers` | named in the task | `password reset` |')
+  })
+
+  it('renders a receipt that inferred nothing exactly as before, so earlier signatures keep verifying', () => {
+    const receipt = fixture('/tmp/repo')
+    receipt.files = [
+      { path: 'src/a.ts', change: 'modified', classification: 'allowed', dependency: false, additions: 1, deletions: 0 },
+      { path: 'infra/prod.tf', change: 'modified', classification: 'unexpected', sensitive: 'iac', dependency: false, additions: 1, deletions: 0 },
+      { path: 'secrets/key.pem', change: 'added', classification: 'denied', sensitive: 'secrets', dependency: false, additions: 1, deletions: 0 },
+    ]
+
+    const markdown = renderMarkdown(receipt)
+
+    expect(markdown).not.toContain('Inferred scope')
+    expect(markdown).not.toContain('(inferred)')
+    // Byte-for-byte the pre-inference rows: the Scope cell is the raw value.
+    expect(markdown).toContain('| `src/a.ts` | modified | allowed | — | +1/−0 |')
+    expect(markdown).toContain('| `infra/prod.tf` | modified | unexpected | iac | +1/−0 |')
+    expect(markdown).toContain('| `secrets/key.pem` | added | denied | secrets | +1/−0 |')
+    // An inference-free receipt renders identically whether or not the signed
+    // JSON was written by a client that knew about the field at all.
+    const preInference = structuredClone(receipt)
+    preInference.scope = { allow: receipt.scope.allow, deny: receipt.scope.deny }
+    expect(renderMarkdown(receipt)).toBe(renderMarkdown(preInference))
   })
 
   it('rejects a forged receipt signed by a substituted embedded key', async () => {

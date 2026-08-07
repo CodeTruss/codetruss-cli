@@ -13,7 +13,7 @@ afterEach(async () => {
 })
 
 describe('honest local analysis profile', () => {
-  it('does not emit a perfect security score when graph and SAST never ran', async () => {
+  it('finds the injection the hosted pass used to be needed for, and still withholds scores', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codetruss-analysis-profile-'))
     cleanup.push(root)
     await mkdir(join(root, 'src'))
@@ -28,27 +28,33 @@ describe('honest local analysis profile', () => {
     ].join('\n'))
 
     const analysis = await analyzeRepository(root)
-    expect(analysis.passes).toHaveLength(13)
+    // 13 registry analyzers plus the local security pass, which is deliberately
+    // NOT in the registry so "13 deterministic analyzers" stays true.
+    expect(analysis.passes).toHaveLength(14)
+    expect(analysis.passes.at(-1)?.id).toBe('local-sast')
 
-    // This is the exact misleading value earlier CLI versions inferred from
-    // registry-only findings even though the synthetic SQL injection was never
-    // examined by the hosted SAST pass.
-    expect(computeScores(analysis.index, analysis.findings).security).toBe(100)
+    const injection = analysis.findings.find((finding) => finding.metadata?.ruleId === 'sql-injection')
+    expect(injection).toBeDefined()
+    expect(injection?.severity).toBe('CRITICAL')
+    expect(injection?.filePath).toBe('src/users.ts')
+    expect(injection?.analyzerId).toBe('local-sast')
 
+    // Scores remain withheld: the graph pass and the rest of the rule pack are
+    // still absent, so any number would overstate what ran.
+    expect(computeScores(analysis.index, analysis.findings).security).toBeLessThan(100)
     const evidence = analyzerReceipt(analysis)
     expect(evidence.analysisProfile).toEqual(LOCAL_ANALYSIS_PROFILE)
+    expect(LOCAL_ANALYSIS_PROFILE.omittedPasses).toEqual(['graph'])
     expect(evidence).not.toHaveProperty('scores')
     expect(evidence).not.toHaveProperty('baselineScores')
-    expect(JSON.stringify(evidence)).not.toContain('"security"')
   })
 
-  it('discloses the absent SAST pass on the TypeScript repos where it used to stay silent', async () => {
+  it('discloses the rule classes the local security pass still does not check', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codetruss-local-sast-gap-'))
     cleanup.push(root)
     await mkdir(join(root, 'src'))
     // A repo large enough to draw coverage conclusions, entirely in a language
-    // the SAST engine covers — the exact shape that produced zero coverage
-    // findings while the injection rules never ran.
+    // the local pass covers.
     for (let unit = 0; unit < 8; unit += 1) {
       const body = Array.from({ length: 50 }, (_, line) => `  const value${line} = ${line} * ${unit + 1}`)
       await writeFile(
@@ -63,11 +69,14 @@ describe('honest local analysis profile', () => {
     const finding = coverage!.result.findings[0]
     expect(finding.category).toBe('SECURITY_HYGIENE')
     expect(finding.severity).toBe('INFO')
-    expect(finding.title).toMatch(/did not run/i)
-    expect(finding.description).toMatch(/SQL injection/)
-    expect(finding.metadata).toMatchObject({ sastPassRan: false, sastLanguages: ['TypeScript'] })
-    // A disclosure, never a blocking accusation: the local verdict must not
-    // fail a change because a pass was absent.
+    expect(finding.title).toMatch(/reduced rule set/i)
+    // "The pass ran" must never be allowed to read as "every class was checked".
+    expect(finding.description).toMatch(/command injection/)
+    expect(finding.description).toMatch(/path traversal/)
+    expect(finding.description).toContain('means "not checked", not "clean"')
+    expect(finding.metadata).toMatchObject({ sastPassRan: true })
+    expect(finding.metadata?.sastUncheckedClasses).toContain('SSRF')
+    // A disclosure, never a blocking accusation.
     expect(finding.severity).not.toBe('HIGH')
     expect(finding.severity).not.toBe('CRITICAL')
   })

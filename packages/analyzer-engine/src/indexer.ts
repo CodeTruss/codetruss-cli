@@ -100,7 +100,12 @@ async function walk(
       if (IGNORED_DIRS.has(entry.name)) continue
       await walk(full, root, state)
     } else if (entry.isFile()) {
-      state.paths.push(relative(root, full))
+      // POSIX separators always: `relative` yields `src\users.ts` on Windows,
+      // and every other path surface (receipts, git snapshots, policy globs,
+      // scope inference) normalizes to `/`. Emitting the raw platform form here
+      // would make the same file read differently on different platforms and
+      // break every path comparison against those surfaces.
+      state.paths.push(relative(root, full).replaceAll('\\', '/'))
     }
   }
 }
@@ -209,13 +214,21 @@ export async function indexWorkingTree(
     // knowledge graph too), and record it for one consolidated finding. Only
     // code kinds are eligible — a doc/config with a "do not edit" banner is not
     // machine-written source.
+    //
+    // The text is retained in `excludedContent` because this exclusion exists to
+    // suppress FALSE findings about machine-written code, not to stop looking
+    // for credentials. A `// AUTO-GENERATED` banner above a live Stripe key must
+    // never buy that key a pass — see secretsAnalyzer.
     if (
       content &&
       (kind === 'source' || kind === 'component' || kind === 'route' || kind === 'test') &&
       generatedLabel(content)
     ) {
       generatedFiles[path] = loc
-      files.push({ path, language, kind: 'generated', sizeBytes: size, loc, sha, content: null })
+      files.push({
+        path, language, kind: 'generated', sizeBytes: size, loc, sha,
+        content: null, excludedContent: content,
+      })
       continue
     }
 

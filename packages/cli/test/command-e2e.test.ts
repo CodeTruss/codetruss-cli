@@ -115,6 +115,96 @@ describe('CLI snapshot and delta enforcement', () => {
     expect(`${setup.stderr}${setup.stdout}`).toContain('--allow')
   }, 30_000)
 
+  it('names the verification commands unattended setup withheld instead of claiming none exist', async () => {
+    // D2/D3: with `"test": "vitest run"` and a lockfile on disk, setup printed
+    // "No repository verification commands were detected" — which reads as
+    // "this repository has no tests" and is simply false. The commands were
+    // detected and deliberately withheld; say that, and say what enables them.
+    const root = await repository()
+    await mkdir(join(root, 'src'))
+    await installPersistentCliFixture(root)
+    await writeFile(join(root, '.gitignore'), '/node_modules\n')
+    await writeFile(
+      join(root, 'package.json'),
+      `${JSON.stringify({ private: true, scripts: { lint: 'eslint .', test: 'vitest run' } }, null, 2)}\n`,
+    )
+    await writeFile(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+
+    const setup = runCli(root, ['setup', '--yes', '--allow', 'src/**', '--hooks', 'all'])
+
+    expect(setup.status, `${setup.stderr}\n${setup.stdout}`).toBe(0)
+    expect(setup.stdout).not.toContain('No repository verification commands were detected')
+    expect(setup.stdout).toContain('did NOT record them')
+    expect(setup.stdout).toContain('pnpm lint')
+    expect(setup.stdout).toContain('pnpm test')
+    expect(setup.stdout).toContain('unattended run must not approve that on your behalf')
+    expect(setup.stdout).toContain('codetruss verify-policy trust')
+    // The withholding itself is unchanged: nothing untrusted lands in policy.
+    expect(await readFile(join(root, '.codetruss.yml'), 'utf8')).not.toMatch(/^verify:\n\s+-/m)
+  }, 30_000)
+
+  it('blames the missing lockfile when detection genuinely finds nothing to run', async () => {
+    // D3: the dependencies analyzer already knows a lockfile is missing. Setup
+    // saying only "none detected" sends the user looking for the wrong problem.
+    const root = await repository()
+    await mkdir(join(root, 'src'))
+    await installPersistentCliFixture(root)
+    await writeFile(join(root, '.gitignore'), '/node_modules\n')
+    await writeFile(
+      join(root, 'package.json'),
+      `${JSON.stringify({ private: true, scripts: { lint: 'eslint .', test: 'vitest run' } }, null, 2)}\n`,
+    )
+
+    const setup = runCli(root, ['setup', '--yes', '--allow', 'src/**', '--hooks', 'all'])
+
+    expect(setup.status, `${setup.stderr}\n${setup.stdout}`).toBe(0)
+    expect(setup.stdout).toContain('No lockfile is committed')
+    expect(setup.stdout).toContain('which package manager runs them')
+    expect(setup.stdout).toMatch(/- lint\n/)
+    expect(setup.stdout).toMatch(/- test\n/)
+  }, 30_000)
+
+  it('keeps setup’s own footprint inside approved scope on the first commit', async () => {
+    // D4: `.claude/settings.json`, `.codetruss.yml` and `.codex/hooks.json` are
+    // written BY setup, then flagged "changed outside approved scope" on the
+    // user's very first review — CodeTruss failing its own installation.
+    const root = await repository()
+    await mkdir(join(root, 'src'))
+    await installPersistentCliFixture(root)
+    await writeFile(join(root, '.gitignore'), '/node_modules\n')
+    await writeFile(join(root, 'src', 'value.ts'), 'export const value = 1\n')
+    git(root, 'add', '.')
+    git(root, 'commit', '--quiet', '-m', 'baseline')
+
+    const setup = runCli(root, ['setup', '--yes', '--allow', 'src/**', '--hooks', 'all'])
+    expect(setup.status, `${setup.stderr}\n${setup.stdout}`).toBe(0)
+    expect(setup.stdout).toContain('Commit .codetruss.yml so this policy is reviewable.')
+
+    git(root, 'add', '.')
+    const review = runCli(root, ['review', '--staged', '--task', 'Install CodeTruss', '--no-verify'])
+    const receipt = await latestReceipt(root)
+    const footprint = ['.codetruss.yml', '.claude/settings.json', '.codex/hooks.json']
+    for (const path of footprint) {
+      const file = receipt.files.find((entry) => entry.path === path)
+      expect(file, `${path} missing from ${JSON.stringify(receipt.files.map((f) => f.path))}`).toBeDefined()
+      expect(file!.classification, path).toBe('allowed')
+    }
+    expect(receipt.reasons.join('\n')).not.toContain('outside approved scope')
+    // `.codetruss.yml` stays a sensitive policy surface — reviewing a policy
+    // change is the point — so the verdict is still REVIEW_REQUIRED, now for a
+    // reason that is about the user's repository rather than CodeTruss's own files.
+    expect(review.status).toBe(1)
+    expect(receipt.reasons.join('\n')).toContain('.codetruss.yml (policy)')
+  }, 30_000)
+
+  it('lists trust-key in --help, since blocked commits tell you to run it', async () => {
+    // D8: the error a blocked teammate hits names `verify-policy trust-key`,
+    // and --help did not admit the subcommand existed.
+    const root = await repository()
+    const help = runCli(root, ['--help'])
+    expect(`${help.stdout}${help.stderr}`).toContain('verify-policy [status|trust|trust-key|revoke]')
+  }, 30_000)
+
   it('completes idempotent local-only setup and keeps generated evidence out of normal staging', async () => {
     const root = await repository()
     await mkdir(join(root, 'src'))
@@ -600,6 +690,50 @@ describe('CLI snapshot and delta enforcement', () => {
     expect(receipt.analyzers.findings.some((finding) => finding.title.includes('AWS access key'))).toBe(true)
     expect(receipt.diff.truncated).toBe(false)
     expect(await readFile(join(root, '.codetruss', 'receipts', receipt.evidence.patchFile!), 'utf8')).toContain(SYNTHETIC_AWS_KEY)
+    // The rendered receipt carries the move-to-env suggestion, and the credential
+    // stays out of it: the captured patch is the only place the value appears.
+    const markdown = await readFile(join(root, '.codetruss', 'receipts', `${receipt.sessionId}.md`), 'utf8')
+    expect(markdown).toContain('## Suggested fixes (1)')
+    expect(markdown).toContain('+export const key = process.env.KEY')
+    expect(markdown).not.toContain(SYNTHETIC_AWS_KEY)
+  }, 20_000)
+
+  it('does not let an AUTO-GENERATED banner buy a committed live key a PASS', async () => {
+    // D1: generated-file classification exists to suppress FALSE quality
+    // findings about machine-written code. It silently disabled EVERY analyzer,
+    // secrets included — so the four lines below produced a signed PASS while
+    // the identical file without the banner FAILED. One comment, whole scanner
+    // bypassed.
+    const root = await repository()
+    await mkdir(join(root, 'src'))
+    await writeFile(join(root, 'src', 'app.ts'), 'export const app = 1\n')
+    git(root, 'add', '.')
+    git(root, 'commit', '--quiet', '-m', 'baseline')
+    const stripeKey = `sk_live_51QN8${'a1B2c3D4e5F6g7H8'.repeat(2)}`
+    await writeFile(
+      join(root, 'src', 'generated-config.ts'),
+      '// AUTO-GENERATED FILE - DO NOT EDIT\n'
+      + '// Regenerate with: pnpm codegen\n\n'
+      + `export const STRIPE_SECRET = '${stripeKey}'\n`,
+    )
+    git(root, 'add', 'src/generated-config.ts')
+
+    const result = runCli(root, ['review', '--staged', '--task', 'Add generated config', '--allow', 'src/**', '--no-verify'])
+
+    expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(2)
+    const receipt = await latestReceipt(root)
+    expect(receipt.verdict).toBe('FAILED')
+    const secret = receipt.analyzers.findings.find((finding) => finding.title.includes('Stripe live secret key'))
+    expect(secret, JSON.stringify(receipt.analyzers.findings.map((f) => f.title))).toBeDefined()
+    expect(secret!.filePath).toBe('src/generated-config.ts')
+    expect(secret!.severity).toBe('HIGH')
+    // The value itself never reaches the receipt.
+    expect(JSON.stringify(receipt.analyzers)).not.toContain(stripeKey)
+    // …and the exclusion that suppressed the other analyzers is on the record,
+    // naming the exact file, at four lines and ~150 bytes.
+    const disclosure = receipt.analyzers.findings.find((finding) => finding.title.startsWith('Generated code excluded'))
+    expect(disclosure, JSON.stringify(receipt.analyzers.findings.map((f) => f.title))).toBeDefined()
+    expect(disclosure!.description).toContain('src/generated-config.ts')
   }, 20_000)
 
   it('runs verification against the exact staged snapshot instead of unstaged bytes', async () => {
@@ -663,6 +797,60 @@ describe('CLI snapshot and delta enforcement', () => {
     ])
     expect(receipt.coverageNotes.at(-1)).toContain('installed Node dependencies')
   }, 20_000)
+
+  /**
+   * The first session a stranger ever runs. `setup --yes` adopts whatever
+   * conventional directories exist, the agent then does something entirely
+   * reasonable one directory over, and the signature detection has to read as
+   * signal rather than as a false alarm — without going quiet on real drift.
+   */
+  it('does not raise scope drift on a plausible first turn, and still raises it on an unrelated one', async () => {
+    const root = await repository()
+    await mkdir(join(root, 'src'))
+    await writeFile(join(root, 'src', 'index.ts'), 'export const value = 1\n')
+    git(root, 'add', '.')
+    git(root, 'commit', '--quiet', '-m', 'baseline')
+
+    const setup = runCli(root, ['setup', '--yes', '--hooks', 'none'])
+    expect(setup.status, `${setup.stderr}\n${setup.stdout}`).toBe(0)
+    expect(setup.stdout).toContain('Adopted detected allowed change roots: src/**')
+    git(root, 'add', '.codetruss.yml')
+    git(root, 'commit', '--quiet', '-m', 'adopt codetruss policy')
+
+    await mkdir(join(root, 'server', 'auth'), { recursive: true })
+    await writeFile(join(root, 'server', 'auth', 'password-reset.ts'), 'export const reset = () => true\n')
+    await writeFile(join(root, 'server', 'auth', 'tokens.ts'), 'export const token = () => "t"\n')
+
+    const first = runCli(root, ['review', '--task', 'Add password reset', '--no-verify'])
+    expect(first.status, `${first.stderr}\n${first.stdout}`).toBe(0)
+    const firstReceipt = await latestReceipt(root)
+    expect(firstReceipt.verdict).toBe('PASS')
+    expect(firstReceipt.scope.inferred).toEqual([{
+      root: 'server/auth',
+      basis: 'working-set',
+      evidence: ['server/auth/password-reset.ts', 'server/auth/tokens.ts'],
+    }])
+    expect(firstReceipt.files.map((file) => file.classification)).toEqual(['inferred', 'inferred'])
+    const markdown = await readFile(join(root, '.codetruss', 'receipts', `${firstReceipt.sessionId}.md`), 'utf8')
+    expect(markdown).toContain('## Inferred scope (1)')
+    // The inferred root is only judgeable against the roots that WERE approved,
+    // so the receipt names every one of them — the detected source root and the
+    // footprint setup wrote for itself.
+    expect(markdown).toContain('Approved allow roots: `src/**`, `.codetruss.yml`, `.claude/**`, `.codex/**`, `.githooks/**`.')
+    expect(runCli(root, ['verify', firstReceipt.sessionId]).status).toBe(0)
+
+    git(root, 'add', '.')
+    git(root, 'commit', '--quiet', '-m', 'password reset')
+    await mkdir(join(root, 'analytics'), { recursive: true })
+    await writeFile(join(root, 'analytics', 'tracker.ts'), 'export const track = () => undefined\n')
+
+    const drifted = runCli(root, ['review', '--task', 'Add password reset', '--no-verify'])
+    expect(drifted.status, `${drifted.stderr}\n${drifted.stdout}`).toBe(1)
+    const driftReceipt = await latestReceipt(root)
+    expect(driftReceipt.verdict).toBe('REVIEW_REQUIRED')
+    expect(driftReceipt.scope.inferred).toBeUndefined()
+    expect(driftReceipt.reasons).toContain('1 file(s) changed outside approved scope: analytics/tracker.ts')
+  }, 30_000)
 
   it('does not fail a harmless edit because of an unchanged pre-existing finding', async () => {
     const root = await repository()

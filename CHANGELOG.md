@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.30 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.30),
+The current public release is [v0.2.36 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.36),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 The npm `latest` tag is still
 [`@codetruss/cli@0.2.24`](https://www.npmjs.com/package/@codetruss/cli/v/0.2.24):
@@ -15,6 +15,175 @@ were superseded before distribution.
 ## Unreleased
 
 No unreleased changes.
+
+## 0.2.36 — 2026-08-07
+
+- **Indexed file paths are now the same bytes on every platform.** The
+  repository walk emitted whatever separator the host used, so a Windows run
+  produced `src\users.ts` while every other path surface in the CLI — receipts,
+  git snapshots, policy globs, scope inference — normalized to `src/users.ts`.
+  Three consequences, all fixed by normalizing at the source: a signed receipt's
+  findings table and its changed-files table named the same file two different
+  ways; receipt bytes differed by platform for an identical tree, so a
+  cross-platform reproduction could not match; and vendored-directory exclusion
+  (`.claude/`, `vendor/`, …) silently stopped matching on Windows, pulling
+  tooling payloads back into analysis.
+- `changedFindings()` now compares paths separator-agnostically as well. The
+  source fix already makes both sides POSIX, so this is defense in depth against
+  any future caller that hands in a raw platform path.
+
+- **Security analysis now runs locally.** The rule pack and taint solver that
+  previously existed only in hosted scans execute on your machine, offline, over
+  the JavaScript, TypeScript and TSX in your repository — the same engine, not a
+  reimplementation. Seven rules ship: SQL injection tracked from request source
+  to query execution, mass assignment, open-record write payloads, un-awaited
+  database writes, swallowed errors, coercion-prone `==` comparisons, and N+1
+  queries in loops.
+- The blocker was packaging, not the rules: the tree-sitter WASM grammars the
+  engine parses with are six times the CLI's entire 1 MB release budget. So the
+  engine moved behind an injected parser interface and the CLI got a
+  zero-dependency JavaScript/TypeScript/JSX parser that emits the same syntax
+  vocabulary. One rule pack, two front-ends, nothing duplicated to drift.
+- That parser is strict where a normal one recovers: anything it cannot
+  represent exactly is skipped and reported as lost coverage, so unsupported
+  syntax costs a finding CodeTruss never makes rather than one it makes wrongly.
+  Both parsers were run over 1,314 real files with the same rules and produced
+  identical findings — nothing found only locally, nothing lost.
+- **Local security findings are REVIEW_REQUIRED, never FAILED.** They do not
+  fail a verdict or halt an agent turn on their own. Blocking is a promotion
+  precision has to earn on real repositories; severity alone does not grant it.
+- `unawaited-persistence` now also catches a raw driver write whose promise is
+  dropped — `pool.query("INSERT …")` with no `await` — which the ORM-shaped
+  checks could not see. Reads, callback-style calls, and handled promises are
+  untouched.
+- **Receipts state the new boundary.** The analysis profile is now
+  `local-registry-v2`, and the receipt names both what the local pass checked and
+  what it still did not: command injection, path traversal, SSRF, XSS,
+  deserialization, and every non-JavaScript language. Receipts signed by earlier
+  versions keep verifying byte-for-byte against the wording they were signed
+  with.
+- Cost: about 0.3 s over 2.5 MB of source, roughly a quarter of one percent of
+  the agent hook's budget, and faster than the hosted parser it stands in for.
+
+## 0.2.34 — 2026-08-07
+
+- Findings can now carry a suggested fix: a description, a unified diff or
+  snippet, and a required safety note, rendered in the receipt as a **Suggested
+  fixes** section and available as `fix` on the JSON finding. A suggestion is
+  never applied, written, or run, and never framed as required — a change derived
+  from one matched line cannot see the rest of the codebase.
+- An analyzer attaches one only where the finding's own evidence determines a
+  single correct change. Where the right fix is ambiguous the prose suggestion
+  stays the whole answer and no `fix` is attached, because a wrong autofix is a
+  false positive with extra damage.
+- **Committed secrets** get a move-to-env diff: the literal becomes
+  `process.env.X` (or `os.environ`, `os.Getenv`, `ENV.fetch`, `getenv` by
+  language), with the matching `.env.example` line appended at the correct
+  offset. The removed line is shown with the credential **masked** — CodeTruss
+  never echoes a credential, not even into its own suggestion — so the diff
+  cannot apply cleanly by design, and the note says so and leads with rotation.
+  A tracked `.env` gets the untracking commands instead. A key inside a call, a
+  private-key block, or an unsupported language gets prose only.
+- A credential found inside a **generated** file is still reported in full, but
+  gets no diff: the next generation would overwrite the edit, so the fix belongs
+  in the generator's input, not in that line.
+- **No lockfile committed** gets the refresh command for the package manager the
+  repository itself declares. With no such evidence it lists every option rather
+  than guessing one — a lockfile from the wrong manager is worse than none.
+- **Missing README** and **No CI pipeline** get minimal starter blocks. The
+  workflow is built only from scripts `package.json` actually defines, and is
+  withheld entirely where the setup steps would have to be guessed.
+- Under an agent hook, the highest-severity suggestion is appended to the Stop
+  summary in its own field, so the five-reason display cap can never drop it and
+  the agent can correct the change before a person opens the receipt.
+- Suggested fixes quote real source lines, so they are stripped from the hosted
+  sync copy. Receipts whose findings carry no fix render byte for byte as before,
+  so earlier signatures keep verifying.
+
+## 0.2.33 — 2026-08-07
+
+- A generated-file banner can no longer hide a committed credential. A four-line
+  file whose first line read `// AUTO-GENERATED FILE - DO NOT EDIT` produced a
+  signed PASS with a live Stripe key on line four; the identical file without
+  that comment FAILED. Generated classification exists to stop machine-written
+  output producing spurious "oversized file" findings, but it was excluding those
+  files from every analyzer, secret scanning included, so one comment bypassed
+  the whole scanner. The excluded text is now retained for the secrets pass only:
+  LOC totals, the architecture graph, and the quality analyzers keep skipping
+  generated files exactly as before.
+- Name every excluded file, at any size. The exclusion note used to appear only
+  above 500 LOC or 50KB and named just the first file as "e.g." — so a small
+  generated stub was dropped from analysis with nothing on the receipt to say so.
+  It now lists every excluded path whenever anything is excluded, and reports
+  small volumes in bytes rather than rounding them to "0 KB".
+- `setup` stops reporting "No repository verification commands were detected"
+  when it detected them. An unattended run deliberately withholds commands it has
+  no permission to execute; it now prints the list it found, why it withheld it,
+  and the exact step that enables it. When detection genuinely fails because no
+  lockfile is committed, it says the lockfile is the reason instead of implying
+  the repository has no tests.
+- npm and yarn repositories get the same `[lint, test]` collection pnpm already
+  had, instead of losing their lint command over which lockfile they commit.
+- `setup`'s own footprint — `.codetruss.yml`, `.claude/**`, `.codex/**`,
+  `.githooks/**` — is in scope by default, so installing CodeTruss no longer
+  reports CodeTruss as scope drift on a user's first commit. `.codetruss.yml`
+  remains a sensitive policy surface, and setup now says to commit it so the
+  policy stays reviewable.
+- The installer no longer prints "Ready" while an older binary shadows the one it
+  just installed. `install.sh` compares what `command -v codetruss` resolves to
+  against the completed install and prints the PATH fix when they differ;
+  `hooks doctor` warns on the same version skew, reading the shadowing install's
+  manifest rather than executing whatever is first on PATH.
+- `codetruss verify-policy trust-key` is listed in `--help`. Blocked-commit
+  errors already told people to run it.
+- The verification-command trust store honors `XDG_CONFIG_HOME`, matching where
+  the saved login already lives. An approval left at the legacy `~/.config` path
+  keeps being read, so setting that variable never orphans a trust store.
+
+## 0.2.32 — 2026-08-06
+
+- Infer this turn's scope so a first session reads as signal, not noise. Scope
+  drift used to fire the moment an agent touched anything outside the
+  directories `setup` happened to find on disk, which made the one detection
+  nobody else ships debut as a false alarm. A path with no approved allow root
+  can now be classified `inferred` on this turn's own evidence: the task naming
+  the path or the feature directory, a cohesive working set under one shared
+  parent, or a test file mirroring a source file already in scope.
+- Disclose every inferred allowance on the receipt. An "Inferred scope" section
+  names each root, what it was read from, and the approved roots it sits beside,
+  and the changed-file row reads `allowed (inferred)` rather than `allowed`. The
+  PASS reason no longer claims those files were within approved scope. Receipts
+  that inferred nothing render byte for byte as before, so receipts signed by
+  earlier versions keep verifying.
+- Never infer past a hard line. Deny rules win outright, secrets, config and
+  dependency surfaces are not inferable, the repository root is never a root,
+  and no inferred root may climb above an allow root the repository deliberately
+  narrowed. With no allow roots configured at all, the turn is its own scope and
+  the receipt says exactly that.
+- Keep the mid-turn PostToolUse check quiet about a path inference already
+  covers. It sees one tool call, so it infers strictly less than the Stop-time
+  receipt and never more.
+
+## 0.2.31 — 2026-08-06
+
+- Capture a baseline for turns that carry no prompt. Harness machine events —
+  background-task notifications, hook feedback continuations, and resumed agents
+  — reach `UserPromptSubmit` with no prompt at all, and capture assumed there
+  always was one. A promptless turn now snapshots tree state like any other turn,
+  is labelled honestly, and earns a receipt; previously those turns reached Stop
+  with no baseline and went entirely unreviewed.
+- `UserPromptSubmit` never blocks. Blocking there erased a person's prompt
+  because CodeTruss could not take a snapshot — failing closed against the user
+  rather than the agent. Capture failures now emit a note and let the prompt
+  through. Stop remains the enforcement point and still fails closed on a turn
+  with no provable baseline, so an agent cannot finish unreviewed.
+- Exact capture retries a working tree that changes mid-snapshot, bounded at
+  three attempts, and the Stop hook timeout moves to 360s. It had been 300s —
+  exactly the internal review timeout — so the harness killed the hook at the
+  moment the graceful timeout receipt would have been written.
+- Shipped alongside, outside the CLI: production deploys now apply database
+  migrations before serving new code, which had been running against an old
+  schema.
 
 ## 0.2.30 — 2026-08-06
 

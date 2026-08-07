@@ -19,8 +19,8 @@ import {
   type HookReviewRequest,
 } from '../src/hook-runtime.js'
 import { CODETRUSS_HOOK_RESULT_PATH_ENV, CODETRUSS_HOOK_REVIEW_ATTEMPT_ID_ENV } from '../src/hook-result.js'
-import { materializeTreeSnapshot, materializeWorkingTreeSnapshot } from '../src/git-snapshot.js'
-import { doctorHooks, hookStatus, inspectLocalHookHealth, installHooks, uninstallHooks } from '../src/hooks.js'
+import { materializeTreeSnapshot, materializeWorkingTreeSnapshot, WorkingTreeChangedError } from '../src/git-snapshot.js'
+import { doctorHooks, hookStatus, inspectHookDoctor, inspectLocalHookHealth, installedCliVersion, installHooks, uninstallHooks } from '../src/hooks.js'
 import { classifyPath, isDependencyFile, sensitiveCategory } from '../src/policy.js'
 import { hookSessionId } from '../src/receipt.js'
 import {
@@ -435,6 +435,49 @@ describe('hook installation', () => {
       })
     } finally {
       output.mockRestore()
+    }
+  })
+
+  it('warns when an older install shadows the codetruss the hooks will run', async () => {
+    // D6: the installer's readiness check was a bare `command -v codetruss`,
+    // which succeeds just as happily when an older binary sits earlier in PATH.
+    // The hooks invoke `codetruss` by name, so that stale copy is what runs.
+    const root = await repo()
+    await writeConfig(root)
+    const shadow = await mkdtemp(join(tmpdir(), 'codetruss-shadow-install-'))
+    await writeFile(
+      join(shadow, 'package.json'),
+      `${JSON.stringify({ name: '@codetruss/cli', version: '0.0.1-older' })}\n`,
+    )
+    const bin = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'codetruss.cmd' : 'codetruss')
+    await mkdir(dirname(bin), { recursive: true })
+    await writeFile(bin, process.platform === 'win32' ? '@exit /b 0\r\n' : '#!/bin/sh\nexit 0\n')
+    await chmod(bin, 0o755)
+    await installHooks(root, 'pre-commit')
+
+    // Same version: nothing to say.
+    await expect(installedCliVersion(bin)).resolves.toBeUndefined()
+    const quiet = await inspectHookDoctor(root, 'pre-commit')
+    expect(quiet.checks.filter((check) => check.message.includes('but this CLI is'))).toEqual([])
+
+    // Now the resolvable binary belongs to a different install.
+    await rename(bin, join(shadow, basename(bin)))
+    const shadowed = join(shadow, basename(bin))
+    await expect(installedCliVersion(shadowed)).resolves.toBe('0.0.1-older')
+    const priorPath = process.env.PATH
+    process.env.PATH = `${shadow}${delimiter}${priorPath ?? ''}`
+    try {
+      const doctor = await inspectHookDoctor(root, 'pre-commit')
+      const shadowWarning = doctor.checks.find((check) => check.message.includes('0.0.1-older'))
+      expect(shadowWarning, JSON.stringify(doctor.checks)).toBeDefined()
+      expect(shadowWarning!.level).toBe('warning')
+      expect(shadowWarning!.message).toMatch(/first on PATH|remove the older/)
+      // A version skew is not a broken installation — it must not fail doctor.
+      expect(doctor.ok).toBe(true)
+    } finally {
+      if (priorPath === undefined) delete process.env.PATH
+      else process.env.PATH = priorPath
+      await rm(shadow, { recursive: true, force: true })
     }
   })
 
@@ -883,19 +926,68 @@ describe('agent hook runtime', () => {
     })
   })
 
-  it.each(['claude', 'codex'] as const)('blocks invalid UserPromptSubmit input with the %s decision contract', async (surface) => {
+  // Variant 1 of the reported bug: a promptless UserPromptSubmit blocked the
+  // human's prompt outright. A promptless turn is a legitimate turn shape, so it
+  // must capture from tree state and never return a block decision.
+  it.each(['claude', 'codex'] as const)('captures a promptless %s turn instead of blocking the prompt', async (surface) => {
     const root = await repo()
     const output = await handleAgentHook(root, surface, {
-      session_id: `${surface}-invalid-prompt`,
+      session_id: `${surface}-promptless`,
+      turn_id: `${surface}-promptless-turn`,
       hook_event_name: 'UserPromptSubmit',
       cwd: root,
     }, config())
-    expect(output).toEqual({
-      decision: 'block',
-      reason: expect.stringContaining('missing the submitted prompt'),
-    })
-    expect(output).not.toHaveProperty('continue')
-    expect(output).not.toHaveProperty('stopReason')
+
+    expect(output).toBeUndefined()
+    const session = stateDir(root, surface, `${surface}-promptless`)
+    const current = JSON.parse(await readFile(join(session, 'current.json'), 'utf8')) as { turnKey: string }
+    const state = JSON.parse(await readFile(join(session, current.turnKey, 'state.json'), 'utf8')) as Record<string, unknown>
+    expect(state).toMatchObject({ status: 'ready', task: '[no prompt] agent turn with no submitted prompt text' })
+    expect(state.baselineCommit).toEqual(expect.any(String))
+  })
+
+  // Variant 2 of the reported bug: because the promptless turn never captured a
+  // baseline, Stop reported "no exact baseline was captured for this agent turn"
+  // and the turn went unreviewed. Capturing promptless turns fixes it at the root.
+  it('reviews a promptless turn at Stop instead of reporting no baseline', async () => {
+    const root = await repo()
+    const receipt = join(root, '.codetruss', 'receipts', 'promptless.md')
+    await mkdir(dirname(receipt), { recursive: true })
+    await writeFile(receipt, '# promptless turn\n')
+    const turn = {
+      session_id: 'promptless-stop-session',
+      turn_id: 'promptless-stop-turn',
+      cwd: root,
+    }
+    const runReview = vi.fn(async (request: HookReviewRequest) => hookReviewResponse(request, 'PASS', 0, receipt))
+
+    // No `prompt` field at all — a harness machine event, as delivered on resume.
+    await expect(handleAgentHook(root, 'claude', {
+      ...turn,
+      hook_event_name: 'UserPromptSubmit',
+    }, config(), { runReview })).resolves.toBeUndefined()
+
+    const stop = await handleAgentHook(root, 'claude', {
+      ...turn,
+      hook_event_name: 'Stop',
+      background_tasks: [],
+    }, config(), { runReview })
+
+    expect(stop).toBeUndefined()
+    expect(runReview).toHaveBeenCalledTimes(1)
+    expect(runReview.mock.calls[0][0].task).toBe('[no prompt] agent turn with no submitted prompt text')
+  })
+
+  it.each(['claude', 'codex'] as const)('never blocks a %s prompt when capture cannot even start', async (surface) => {
+    const root = await repo()
+    const output = await handleAgentHook(root, surface, {
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'Change the value',
+      cwd: root,
+    }, config())
+
+    expect(output).toEqual({ systemMessage: expect.stringContaining('missing session_id') })
+    expect(output).not.toHaveProperty('decision')
   })
 
   it('fails closed on a cross-session current selector and leaves the targeted session untouched', async () => {
@@ -986,6 +1078,33 @@ describe('agent hook runtime', () => {
     expect(JSON.stringify(output)).toContain('sensitive ci surface')
     expect(runReview).not.toHaveBeenCalled()
     await expect(readFile(join(root, '.codetruss', 'receipts', 'latest'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('stays quiet mid-turn on a path the turn evidence already places in scope', async () => {
+    // A repository with no approved allow roots would otherwise be told every
+    // single edit is drift — the exact wall of noise that gets an always-on
+    // hook uninstalled on day one. Inference covers it; the receipt discloses
+    // it. Surfaces inference may never reach still speak up.
+    const root = await repo()
+    const quiet = await handleAgentHook(root, 'claude', {
+      session_id: 'session-inferred', hook_event_name: 'PostToolUse', cwd: root,
+      tool_input: { file_path: join(root, 'server', 'auth', 'password-reset.ts') },
+    }, config([]))
+    expect(quiet).toBeUndefined()
+
+    const sensitive = await handleAgentHook(root, 'claude', {
+      session_id: 'session-inferred-sensitive', hook_event_name: 'PostToolUse', cwd: root,
+      tool_input: { file_path: join(root, 'infra', 'prod.tf') },
+    }, config([]))
+    expect(JSON.stringify(sensitive)).toContain('outside the allowed task scope')
+    expect(JSON.stringify(sensitive)).toContain('sensitive iac surface')
+
+    // An approved policy still narrows what a single tool call can establish.
+    const narrowed = await handleAgentHook(root, 'claude', {
+      session_id: 'session-inferred-narrow', hook_event_name: 'PostToolUse', cwd: root,
+      tool_input: { file_path: join(root, 'server', 'auth', 'password-reset.ts') },
+    }, config(['src/**']))
+    expect(JSON.stringify(narrowed)).toContain('outside the allowed task scope')
   })
 
   it('normalizes outside paths and tolerates unknown tool schemas', async () => {
@@ -1133,6 +1252,88 @@ describe('agent hook runtime', () => {
     })
     expect(spawnSync('git', ['-C', root, 'cat-file', '-e', requests[0].baselineRef]).status).not.toBe(0)
     expect(spawnSync('git', ['-C', root, 'cat-file', '-e', requests[0].baselineRef], { env: privateGitReadEnvironment(requests[0].objectDirectory) }).status).not.toBe(0)
+  })
+
+  it('retries transient working-tree drift while capturing Stop evidence', async () => {
+    const root = await repo()
+    const receipt = join(root, '.codetruss', 'receipts', 'stop-retry.md')
+    await mkdir(dirname(receipt), { recursive: true })
+    await writeFile(receipt, '# stop retry\n')
+    const prompt = {
+      session_id: 'stop-retry-session',
+      turn_id: 'stop-retry-turn',
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'Retry the final snapshot once',
+      cwd: root,
+    }
+    let captureCalls = 0
+    const captureBaseline = vi.fn(async (captureRoot: string, parent: string, store: PrivateGitObjectStore) => {
+      captureCalls++
+      if (captureCalls === 2) throw new WorkingTreeChangedError('src/value.ts')
+      return createExactHookBaseline(captureRoot, parent, store)
+    })
+    const runReview = vi.fn(async (request: HookReviewRequest) => hookReviewResponse(request, 'PASS', 0, receipt))
+    const dependencies = { captureBaseline, runReview }
+
+    await expect(handleAgentHook(root, 'claude', prompt, config(), dependencies)).resolves.toBeUndefined()
+    await expect(handleAgentHook(root, 'claude', {
+      ...prompt,
+      hook_event_name: 'Stop',
+      background_tasks: [],
+    }, config(), dependencies)).resolves.toBeUndefined()
+
+    expect(captureBaseline).toHaveBeenCalledTimes(3)
+    expect(runReview).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves ready Stop state after retry exhaustion and recovers on the next Stop', async () => {
+    const root = await repo()
+    const receipt = join(root, '.codetruss', 'receipts', 'stop-recovery.md')
+    await mkdir(dirname(receipt), { recursive: true })
+    await writeFile(receipt, '# stop recovery\n')
+    const prompt = {
+      session_id: 'stop-recovery-session',
+      turn_id: 'stop-recovery-turn',
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'Preserve the baseline if final capture is unstable',
+      cwd: root,
+    }
+    let captureCalls = 0
+    let finalStable = false
+    const captureBaseline = vi.fn(async (captureRoot: string, parent: string, store: PrivateGitObjectStore) => {
+      captureCalls++
+      if (captureCalls > 1 && !finalStable) throw new WorkingTreeChangedError('src/value.ts')
+      return createExactHookBaseline(captureRoot, parent, store)
+    })
+    const runReview = vi.fn(async (request: HookReviewRequest) => hookReviewResponse(request, 'PASS', 0, receipt))
+    const dependencies = { captureBaseline, runReview }
+
+    await handleAgentHook(root, 'claude', prompt, config(), dependencies)
+    const firstStop = await handleAgentHook(root, 'claude', {
+      ...prompt,
+      hook_event_name: 'Stop',
+      background_tasks: [],
+    }, config(), dependencies)
+
+    expect(captureBaseline).toHaveBeenCalledTimes(4)
+    expect(runReview).not.toHaveBeenCalled()
+    expect(firstStop).toEqual({ decision: 'block', reason: expect.stringContaining('working tree changed while snapshotting') })
+    const session = stateDir(root, 'claude', prompt.session_id)
+    const current = JSON.parse(await readFile(join(session, 'current.json'), 'utf8')) as { turnKey: string }
+    const statePath = join(session, current.turnKey, 'state.json')
+    const readyState = JSON.parse(await readFile(statePath, 'utf8')) as Record<string, unknown>
+    expect(readyState).toMatchObject({ status: 'ready' })
+    expect(readyState).not.toHaveProperty('finalCommit')
+    expect(readyState).not.toHaveProperty('reviewAttemptId')
+
+    finalStable = true
+    await expect(handleAgentHook(root, 'claude', {
+      ...prompt,
+      hook_event_name: 'Stop',
+      background_tasks: [],
+    }, config(), dependencies)).resolves.toBeUndefined()
+    expect(captureBaseline).toHaveBeenCalledTimes(5)
+    expect(runReview).toHaveBeenCalledTimes(1)
   })
 
   it('resumes reviewing with the persisted final OID and deterministic attempt instead of recapturing a later tree', async () => {
@@ -1493,7 +1694,7 @@ describe('agent hook runtime', () => {
     const first = handleAgentHook(root, 'codex', prompt, config(), { captureBaseline })
     await captureStarted
     const duplicate = await handleAgentHook(root, 'codex', prompt, config(), { captureBaseline })
-    expect(duplicate).toMatchObject({ decision: 'block', reason: expect.stringContaining('already running') })
+    expect(duplicate).toEqual({ systemMessage: expect.stringContaining('already running') })
     expect(duplicate).not.toHaveProperty('continue')
     expect(captureBaseline).toHaveBeenCalledTimes(1)
     releaseCapture()
@@ -1544,7 +1745,72 @@ describe('agent hook runtime', () => {
     await expect(stat(join(liveTurnDir, 'state.json'))).resolves.toBeDefined()
   }, 30_000)
 
-  it('keeps private prompt state under Git metadata and blocks prompt processing if exact capture fails', async () => {
+  it('retries the whole exact capture after transient working-tree drift', async () => {
+    const root = await repo()
+    const prompt = {
+      session_id: 'capture-retry-session',
+      turn_id: 'capture-retry-turn',
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'Capture this task once the concurrent edit settles',
+      cwd: root,
+    }
+    let attempts = 0
+    const captureBaseline = vi.fn(async (captureRoot: string, parent: string, store: PrivateGitObjectStore) => {
+      attempts++
+      if (attempts === 1) throw new WorkingTreeChangedError('src/value.ts')
+      return createExactHookBaseline(captureRoot, parent, store)
+    })
+
+    await expect(handleAgentHook(root, 'claude', prompt, config(), { captureBaseline })).resolves.toBeUndefined()
+
+    expect(captureBaseline).toHaveBeenCalledTimes(2)
+    const session = stateDir(root, 'claude', prompt.session_id)
+    const current = JSON.parse(await readFile(join(session, 'current.json'), 'utf8')) as { turnKey: string }
+    const state = JSON.parse(await readFile(join(session, current.turnKey, 'state.json'), 'utf8')) as Record<string, unknown>
+    expect(state).toMatchObject({ status: 'ready', task: prompt.prompt })
+    await expect(stat(join(session, current.turnKey, 'object-store', 'objects'))).resolves.toBeDefined()
+  })
+
+  it('lets the prompt through after bounded retries, and still holds the agent at Stop', async () => {
+    const root = await repo()
+    const prompt = {
+      session_id: 'capture-exhausted-session',
+      turn_id: 'capture-exhausted-turn',
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'Capture a stable baseline',
+      cwd: root,
+    }
+    const captureBaseline = vi.fn(async () => {
+      throw new WorkingTreeChangedError('src/value.ts')
+    })
+    const failedAt = new Date('2026-08-06T20:00:00.000Z')
+    const dependencies = { captureBaseline, now: () => failedAt }
+
+    const output = await handleAgentHook(root, 'claude', prompt, config(), dependencies)
+
+    expect(captureBaseline).toHaveBeenCalledTimes(3)
+    expect(output).toEqual({ systemMessage: expect.stringContaining('working tree changed while snapshotting') })
+    const session = stateDir(root, 'claude', prompt.session_id)
+    const current = JSON.parse(await readFile(join(session, 'current.json'), 'utf8')) as { turnKey: string }
+    await expect(stat(join(session, current.turnKey, 'object-store'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    // The turn is recorded as failed, so Stop remains the enforcement point:
+    // the human was not blocked, but the agent cannot finish unreviewed.
+    const state = JSON.parse(await readFile(join(session, current.turnKey, 'state.json'), 'utf8')) as Record<string, unknown>
+    expect(state).toMatchObject({ status: 'failed' })
+
+    const stop = await handleAgentHook(root, 'claude', {
+      ...prompt,
+      hook_event_name: 'Stop',
+      background_tasks: [],
+    }, config(), dependencies)
+    expect(stop).toEqual({
+      decision: 'block',
+      reason: expect.stringContaining('working tree changed while snapshotting'),
+    })
+  })
+
+  it('keeps private prompt state under Git metadata and notifies without blocking if exact capture fails', async () => {
     const root = await repo()
     const prompt = { session_id: 'private-session', prompt_id: 'prompt-1', hook_event_name: 'UserPromptSubmit', prompt: 'private task text', cwd: root }
     await expect(handleAgentHook(root, 'claude', prompt, config())).resolves.toBeUndefined()
@@ -1563,10 +1829,10 @@ describe('agent hook runtime', () => {
       expect(contextInfo.mode & 0o777).toBe(0o600)
     }
     expect(git(root, 'status', '--porcelain')).not.toContain('codetruss/hooks')
-    const failed = await handleAgentHook(root, 'claude', { ...prompt, session_id: 'failed-session', prompt_id: 'prompt-fail' }, config(), {
-      captureBaseline: async () => { throw new Error('unstable working tree') },
-    })
-    expect(failed).toEqual({ decision: 'block', reason: expect.stringContaining('unstable working tree') })
+    const captureBaseline = vi.fn(async () => { throw new Error('unrecoverable capture failure') })
+    const failed = await handleAgentHook(root, 'claude', { ...prompt, session_id: 'failed-session', prompt_id: 'prompt-fail' }, config(), { captureBaseline })
+    expect(captureBaseline).toHaveBeenCalledTimes(1)
+    expect(failed).toEqual({ systemMessage: expect.stringContaining('unrecoverable capture failure') })
   })
 
   it('hashes maximum-length agent identifiers into path-budgeted hook state', async () => {
@@ -2046,8 +2312,8 @@ describe('agent hook runtime', () => {
       cwd: root,
     }
 
-    const blocked = await handleAgentHook(root, 'codex', nextPrompt, config())
-    expect(blocked).toEqual({ decision: 'block', reason: expect.stringContaining('active lease') })
+    const notice = await handleAgentHook(root, 'codex', nextPrompt, config())
+    expect(notice).toEqual({ systemMessage: expect.stringContaining('active lease') })
     await expect(stat(legacy.objectStorePath)).resolves.toBeDefined()
     await expect(stat(hookStateRoot(root, 'v1', repositoryKey))).resolves.toBeDefined()
     expect((await readFile(legacy.statePath, 'utf8'))).toContain(`private live ${repositoryKey} task`)
@@ -2083,8 +2349,8 @@ describe('agent hook runtime', () => {
     await writeFile(ownershipPath, '{"invalid":true}\n', { mode: 0o600 })
     const nextPrompt = { ...prompt, prompt: 'Capture after validated cleanup' }
 
-    const blocked = await handleAgentHook(root, 'codex', nextPrompt, config())
-    expect(blocked).toEqual({ decision: 'block', reason: expect.stringContaining('securely cleaned') })
+    const notice = await handleAgentHook(root, 'codex', nextPrompt, config())
+    expect(notice).toEqual({ systemMessage: expect.stringContaining('securely cleaned') })
     expect(await readFile(legacy.statePath, 'utf8')).toContain('private ownership validation task')
     await expect(stat(hookStateRoot(root, 'v1', 'full'))).resolves.toBeDefined()
     await expect(stat(legacy.contextPath)).resolves.toBeDefined()
@@ -2114,9 +2380,9 @@ describe('agent hook runtime', () => {
     state.sessionHash = createHash('sha256').update('different-session').digest('hex')
     await writeFile(legacy.statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 })
 
-    const blocked = await handleAgentHook(root, 'codex', prompt, config())
+    const notice = await handleAgentHook(root, 'codex', prompt, config())
 
-    expect(blocked).toEqual({ decision: 'block', reason: expect.stringContaining('full session hash') })
+    expect(notice).toEqual({ systemMessage: expect.stringContaining('full session hash') })
     expect(await readFile(legacy.statePath, 'utf8')).toContain('preserve exact session binding')
     await expect(stat(legacy.contextPath)).resolves.toBeDefined()
     await expect(stat(legacy.objectStorePath)).resolves.toBeDefined()
@@ -2175,9 +2441,9 @@ describe('agent hook runtime', () => {
     const stateBefore = await readFile(statePath, 'utf8')
     const contextBefore = await readFile(join(turnDir, 'turn-context.json'), 'utf8')
 
-    const blocked = await handleAgentHook(root, 'codex', prompt, config())
+    const notice = await handleAgentHook(root, 'codex', prompt, config())
 
-    expect(blocked).toEqual({ decision: 'block', reason: expect.stringContaining('ownership cannot be proven') })
+    expect(notice).toEqual({ systemMessage: expect.stringContaining('ownership cannot be proven') })
     expect(await readFile(statePath, 'utf8')).toBe(stateBefore)
     expect(await readFile(join(turnDir, 'turn-context.json'), 'utf8')).toBe(contextBefore)
     await expect(stat(join(turnDir, 'object-store'))).resolves.toBeDefined()

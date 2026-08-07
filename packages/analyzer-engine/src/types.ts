@@ -26,6 +26,17 @@ export interface IndexedFile {
   loc: number
   sha: string | null
   content: string | null
+  /**
+   * Text of a file the indexer excluded from analysis by classification
+   * (generated, minified). `content` stays null so LOC totals, the knowledge
+   * graph, and every quality analyzer keep skipping it — that exclusion exists
+   * to stop machine-written output from producing spurious findings.
+   *
+   * Secret scanning is the one pass that must never be exempted by provenance:
+   * a committed credential is a credential whether or not a generator wrote the
+   * line, so `secretsAnalyzer` reads this instead.
+   */
+  excludedContent?: string | null
 }
 
 export interface IndexCoverage {
@@ -55,6 +66,30 @@ export interface RepoIndex {
   coverage?: IndexCoverage
 }
 
+/**
+ * A concrete, reviewable change that would resolve one finding.
+ *
+ * SUGGESTION ONLY. CodeTruss never applies, writes, or executes it, and never
+ * presents it as required — a change derived from a single matched line cannot
+ * know the rest of the codebase. An analyzer attaches one only when the
+ * finding's own evidence (path, line, matched text, index facts) makes the
+ * change correct for that exact instance. When the right fix is ambiguous the
+ * prose `suggestion` stays the whole answer and no `fix` is attached: a wrong
+ * autofix is a false positive with extra damage.
+ */
+export interface FindingFix {
+  /** What the change does, in one line. */
+  description: string
+  /** `diff` is unified-diff text; `snippet` is replacement or starter content. */
+  kind: 'diff' | 'snippet'
+  /** Fenced-code language for rendering — `diff`, `sh`, `yaml`, `markdown`, … */
+  language: string
+  /** The suggested text itself. */
+  content: string
+  /** What the reader must confirm before applying. Never empty. */
+  safetyNote: string
+}
+
 export interface AnalyzerFinding {
   category: FindingCategory
   severity: FindingSeverity
@@ -63,6 +98,8 @@ export interface AnalyzerFinding {
   filePath?: string
   line?: number
   suggestion?: string
+  /** Optional ready-to-review change. Absent whenever the correct fix is ambiguous. */
+  fix?: FindingFix
   impactScore: number
   effort?: 'low' | 'medium' | 'high'
   metadata?: Record<string, unknown>
@@ -118,6 +155,18 @@ export function analyzerResult(output: AnalyzerFinding[]): AnalyzerRunResult {
 export interface AnalyzerContext {
   /** The SAST pass (security rules + taint tracking) runs for this analysis. */
   sast: boolean
+  /**
+   * Vulnerability classes the SAST pass did NOT check in this analysis, when it
+   * ran with a reduced rule set.
+   *
+   * The CLI runs a precision-validated SUBSET of the rule pack behind its
+   * zero-dependency parser: real injection and AI-agent-defect coverage, but not
+   * the classes that still need the hosted graph. "The pass ran" and "every
+   * class was checked" are different claims, and a receipt that conflated them
+   * would be the same blind spot the coverage analyzer exists to close — just
+   * one level down.
+   */
+  sastUncheckedClasses?: readonly string[]
 }
 
 /**

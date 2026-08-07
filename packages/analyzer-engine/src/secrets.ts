@@ -1,3 +1,4 @@
+import { moveSecretToEnvFix, untrackEnvFileFix } from './fixes'
 import { incompleteAnalyzerOutput, type Analyzer, type AnalyzerFinding } from './types'
 
 /**
@@ -73,12 +74,26 @@ export const secretsAnalyzer: Analyzer = {
   async run(index) {
     const findings: AnalyzerFinding[] = []
     const findingLimit = 50
+    // Where a move-to-env fix appends its variable. Undefined means the file
+    // does not exist, which the diff renders as a new-file hunk.
+    const envExample = index.files.find((file) => file.path === '.env.example')?.content
+    const envExampleLines = envExample === undefined || envExample === null
+      ? undefined
+      : envExample.length === 0 ? 0 : envExample.replace(/\n$/, '').split('\n').length
 
     for (const file of index.files) {
-      if (!file.content || SKIP_FILES.test(file.path)) continue
+      // Generated/minified files are excluded from every OTHER analyzer to stop
+      // machine-written output producing spurious quality findings. That
+      // exclusion must never extend to credentials: a leaked key is a leak no
+      // matter which tool emitted the line, and a `DO NOT EDIT` banner would
+      // otherwise be a one-comment bypass of the whole secret scanner.
+      const content = file.content ?? file.excludedContent
+      if (!content || SKIP_FILES.test(file.path)) continue
+      /** Machine-written text: read for credentials, but never hand-edited. */
+      const isGeneratedFile = !file.content
       const isTestContext = TEST_PATH_RE.test(file.path)
       const isSeedScript = SEED_PATH_RE.test(file.path)
-      const lines = file.content.split('\n')
+      const lines = content.split('\n')
       for (let i = 0; i < lines.length && findings.length < findingLimit; i++) {
         const line = lines[i]
         if (PLACEHOLDER.test(line)) continue
@@ -157,6 +172,27 @@ export const secretsAnalyzer: Analyzer = {
               metadata: { credentialType: name, testContext: isTestContext, messageString },
             })
           } else {
+            // A concrete fix only where the evidence determines one: a tracked
+            // .env is untracked wholesale, and a source assignment becomes an
+            // environment read. Anything else (a key inside a call, a private
+            // key block, an unsupported language) keeps the prose suggestion.
+            //
+            // A generated file is read here (`content` came from
+            // excludedContent) precisely so its credentials are not exempt —
+            // but its LINE is not the place to fix them. The next generation
+            // overwrites any edit; the credential has to leave the generator's
+            // input. So the leak is reported and the diff is withheld.
+            const fix = isEnvFile
+              ? untrackEnvFileFix(file.path)
+              : isGeneratedFile
+                ? undefined
+                : moveSecretToEnvFix({
+                    filePath: file.path,
+                    line: i + 1,
+                    lineText: line,
+                    credentialType: name,
+                    envExampleLines,
+                  })
             findings.push({
               category: 'SECURITY_HYGIENE',
               severity: isEnvFile ? 'CRITICAL' : 'HIGH',
@@ -165,6 +201,7 @@ export const secretsAnalyzer: Analyzer = {
               filePath: file.path,
               line: i + 1,
               suggestion: 'Rotate this credential immediately, move it to environment configuration, and add the file to .gitignore. Consider a pre-commit secret scanner.',
+              ...(fix ? { fix } : {}),
               impactScore: 95,
               effort: 'low',
               metadata: { credentialType: name },

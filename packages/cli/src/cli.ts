@@ -27,12 +27,14 @@ import {
   readHookTurnContext,
   type AgentHookSurface,
 } from './hook-runtime.js'
+import { topFixSuggestion } from './fix-suggestions.js'
 import { CODETRUSS_PRE_COMMIT_ENV, doctorHooks, hookStatus, inspectLocalHookHealth, installHooks, uninstallHooks } from './hooks.js'
 import { hostedAuthStatus, loginHosted, logoutHosted } from './hosted-auth.js'
 import { parseInternalHookResultRequest, writeInternalHookResult } from './hook-result.js'
 import { reviewWithLlm } from './llm.js'
 import { collectLocalMetrics, renderLocalMetrics } from './metrics.js'
 import { classifyPath, isDependencyFile, sensitiveCategory } from './policy.js'
+import { applyInferredScope, inferTurnScope } from './scope-inference.js'
 import { policyFingerprint } from './policy-fingerprint.js'
 import {
   CODETRUSS_EVIDENCE_OBJECT_DIRECTORY_ENV,
@@ -310,7 +312,7 @@ Usage:
   codetruss verify [id|latest]
   codetruss sync [id|latest] [--dry-run]
   codetruss auth login|status|logout
-  codetruss verify-policy [status|trust|revoke]
+  codetruss verify-policy [status|trust|trust-key|revoke]
   codetruss hooks install|status|doctor|uninstall [pre-commit|claude|codex|all]
 
 Exit codes: PASS=0, REVIEW_REQUIRED=1, FAILED=2, usage/environment=3.`
@@ -436,13 +438,19 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
       gitEnvironment: immutableTarget.gitEnvironment,
     })
 
-    const files = await changedFiles(
+    const approvedScopeFiles = await changedFiles(
       root, immutableTarget.baselineTreeish, false,
       (path, oldPath) => classifyPath(path, oldPath, options.allow, options.deny),
       sensitiveCategory, isDependencyFile,
       immutableTarget.finalTreeish,
       { env: immutableTarget.gitEnvironment },
     )
+    // Scope inference needs the whole changed set, so it runs after
+    // classification rather than inside it. Deny and sensitive surfaces are
+    // already decided at this point and inference cannot reopen them.
+    const { files, roots: inferredScope } = applyInferredScope(approvedScopeFiles, inferTurnScope({
+      task, files: approvedScopeFiles, allow: options.allow, deny: options.deny,
+    }))
     const diff = await captureDiffEvidence(root, immutableTarget.baselineTreeish, false, files, {
       targetTreeish: immutableTarget.finalTreeish,
       env: immutableTarget.gitEnvironment,
@@ -563,7 +571,12 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
       git: { baselineTree: baselineSnapshot.tree, finalTree: finalSnapshot.tree },
       policy: { sha256: policyFingerprint(options, config) },
       startDirty, startDirtyFiles, agent,
-      scope: { allow: options.allow, deny: options.deny }, files,
+      scope: {
+        allow: options.allow,
+        deny: options.deny,
+        ...(inferredScope.length ? { inferred: inferredScope } : {}),
+      },
+      files,
       diff: {
         sha256: sha256(diff.patch),
         bytes: diff.capturedBytes,
@@ -609,6 +622,9 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
           verdict: receipt.verdict,
           receiptPath: resolve(paths.markdown),
           reasons: receipt.reasons,
+          // Give the agent the one change it can make next turn, before a
+          // person ever opens the receipt. Suggestion only — the wording says so.
+          suggestion: topFixSuggestion(receipt.analyzers.findings),
         },
       )
     }

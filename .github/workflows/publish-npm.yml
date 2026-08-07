@@ -88,7 +88,6 @@ jobs:
             `codetruss-cli-${version}.sbom.cdx.json`,
             `codetruss-cli-${version}.tgz`,
             `codetruss-cli-${version}.tgz.sha256`,
-            'release-manifest.json',
           ].sort()
           if (JSON.stringify(actual) !== JSON.stringify(expected)) {
             throw new Error(`release assets differ from the exact publish set: ${actual.join(', ')}`)

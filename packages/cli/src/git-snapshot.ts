@@ -139,11 +139,20 @@ interface SourceIdentity {
   target?: Buffer
 }
 
-class WorkingTreeChangedError extends Error {
+export class WorkingTreeChangedError extends Error {
   constructor(path: string) {
     super(`working tree changed while snapshotting ${JSON.stringify(path)}`)
     this.name = 'WorkingTreeChangedError'
   }
+}
+
+export function isWorkingTreeChangedError(error: unknown): boolean {
+  let current = error
+  for (let depth = 0; depth < 4 && current instanceof Error; depth++) {
+    if (current instanceof WorkingTreeChangedError) return true
+    current = (current as Error & { cause?: unknown }).cause
+  }
+  return false
 }
 
 function splitNulUtf8(output: Buffer): string[] {

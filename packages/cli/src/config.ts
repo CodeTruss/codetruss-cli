@@ -200,7 +200,30 @@ export async function initialize(root: string, force = false, options: Initializ
   return path
 }
 
+/**
+ * Why auto-detection found nothing, when the answer is actionable. Setup used
+ * to print a flat "no commands were detected", which reads as "this repository
+ * has no tests" even when the repository has `"test": "vitest run"` and is one
+ * `npm install` away from a lockfile.
+ */
+export type VerifyDetectionBlocker = 'missing-lockfile' | 'package-manager-unavailable'
+
+export interface VerifyDetection {
+  /** Commands safe to record. Empty whenever a blocker is set. */
+  commands: string[]
+  blocker?: VerifyDetectionBlocker
+  /**
+   * What was found: full commands when the package manager is known, bare
+   * script names under `missing-lockfile`, where no manager could be resolved.
+   */
+  candidates: string[]
+}
+
 async function detectVerify(root: string): Promise<string[]> {
+  return (await detectVerifyCommands(root)).commands
+}
+
+export async function detectVerifyCommands(root: string): Promise<VerifyDetection> {
   const exists = async (name: string) => access(join(root, name)).then(() => true, () => false)
   // Detect commands without executing repository-controlled code. This also
   // recognizes Windows package-manager shims such as `pnpm.cmd`.
@@ -234,22 +257,35 @@ async function detectVerify(root: string): Promise<string[]> {
       throw new Error(`could not inspect package.json: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  if (await exists('pnpm-lock.yaml')) {
+  /** The same [lint, test] collection for every Node package manager. */
+  const nodeScripts = async (
+    manager: 'pnpm' | 'npm' | 'yarn',
+    format: (name: string) => string,
+  ): Promise<VerifyDetection> => {
     const scripts = await packageScripts()
-    return await available('pnpm') ? ['lint', 'test'].filter((name) => typeof scripts[name] === 'string').map((name) => `pnpm ${name}`) : []
+    const candidates = ['lint', 'test'].filter((name) => typeof scripts[name] === 'string').map(format)
+    if (!candidates.length) return { commands: [], candidates: [] }
+    return await available(manager)
+      ? { commands: candidates, candidates }
+      : { commands: [], candidates, blocker: 'package-manager-unavailable' }
   }
-  if (await exists('package-lock.json')) {
-    const scripts = await packageScripts()
-    return await available('npm') && typeof scripts.test === 'string' ? ['npm test'] : []
+
+  if (await exists('pnpm-lock.yaml')) return nodeScripts('pnpm', (name) => `pnpm ${name}`)
+  // `npm lint` is not a command; only lifecycle names run without `run`.
+  if (await exists('package-lock.json')) return nodeScripts('npm', (name) => `npm run ${name}`)
+  if (await exists('yarn.lock')) return nodeScripts('yarn', (name) => `yarn ${name}`)
+  if ((await exists('go.mod')) && await available('go')) return { commands: ['go test ./...'], candidates: ['go test ./...'] }
+  if ((await exists('Cargo.toml')) && await available('cargo')) return { commands: ['cargo test'], candidates: ['cargo test'] }
+  if (((await exists('pyproject.toml')) || (await exists('requirements.txt'))) && await available('pytest')) {
+    return { commands: ['pytest'], candidates: ['pytest'] }
   }
-  if (await exists('yarn.lock')) {
-    const scripts = await packageScripts()
-    return await available('yarn') && typeof scripts.test === 'string' ? ['yarn test'] : []
-  }
-  if ((await exists('go.mod')) && await available('go')) return ['go test ./...']
-  if ((await exists('Cargo.toml')) && await available('cargo')) return ['cargo test']
-  if (((await exists('pyproject.toml')) || (await exists('requirements.txt'))) && await available('pytest')) return ['pytest']
-  return []
+  // A package.json with runnable scripts and no lockfile is the common case
+  // where detection legitimately fails: CodeTruss cannot tell which package
+  // manager to invoke. Say that, rather than implying there is nothing to run.
+  const scripts = await packageScripts()
+  const candidates = ['lint', 'test'].filter((name) => typeof scripts[name] === 'string')
+  if (candidates.length) return { commands: [], candidates, blocker: 'missing-lockfile' }
+  return { commands: [], candidates: [] }
 }
 
 /**

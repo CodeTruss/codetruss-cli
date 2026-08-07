@@ -1,0 +1,586 @@
+import {
+  sastLanguageForPath,
+  MAX_NODES,
+  type SastLanguage,
+  type SastParser,
+  type SyntaxNode,
+} from './lang'
+import { asCall, asFunction, urlHeadOf, walk, type NCall, type NFunc } from './normalize'
+import {
+  analyzeFunction,
+  bindsToLocalFn,
+  firstSource,
+  hasRealSource,
+  paramIndexes,
+  taintBudgetExhausted,
+  taintOf,
+  type FunctionTaint,
+} from './taint'
+import { PATTERN_RULES, TAINT_ASSIGN_SINKS, TAINT_SINKS, asNamedValue, ruleAppliesTo, type TaintAssignSink, type TaintSink } from './rules'
+import { CWE } from './cwe'
+import type { CodeLocation, Flow, SastFinding, SastResult } from './types'
+
+/**
+ * The SAST engine: parse → taint → match rules → findings.
+ *
+ * Per file we run one taint solve per function, evaluate every call against the
+ * taint sinks (direct findings + interprocedural param summaries), then a single
+ * pattern-rule pass over the whole tree. Everything is bounded per file and the
+ * whole thing is fail-soft: a parse error, a grammar that won't load, or a
+ * runaway file degrades to fewer/zero findings for that file — never a thrown
+ * scan. Absence of a finding is therefore never a proof of safety, which the
+ * diagnostics make explicit.
+ *
+ * The parser is injected ({@link SastParser}) so the same rule pack runs behind
+ * the hosted WASM grammars and behind the CLI's zero-dependency JS parser. A
+ * language the injected parser does not cover is reported as degraded — the one
+ * honest answer, and the reason a leaner parser can never turn into a wrong
+ * finding.
+ */
+
+export interface ScanInput {
+  filePath: string
+  content: string
+}
+
+/** Rules this scan is allowed to report. Absent = the whole pack. */
+export interface ScanOptions {
+  /** Rule ids to keep. A rule outside the set never runs against a node. */
+  ruleIds?: ReadonlySet<string>
+}
+
+const MAX_FINDINGS_PER_FILE = 100
+const MAX_FINDINGS_PER_SCAN = 100_000
+
+/** Scan a set of source files and return findings + honest diagnostics. */
+export async function scanFiles(
+  files: ScanInput[],
+  parser: SastParser,
+  options: ScanOptions = {},
+): Promise<SastResult> {
+  const findings: SastFinding[] = []
+  let filesScanned = 0
+  let filesSkipped = 0
+  let truncatedFiles = 0
+  let findingsTruncated = false
+  const degraded = new Set<SastLanguage>()
+
+  // web-tree-sitter grows its WASM heap while parsing and does not return that
+  // high-water allocation to the host process between files. Continuing with
+  // even a pattern-only parse after crossing the function budget can therefore
+  // OOM the worker. Stop parsing new files once RSS crosses the limit, report
+  // them as skipped, and let the scan authority layer withhold scores. This is
+  // fail-closed: partial findings survive, but absence is never called clean.
+  const configuredRssLimit = Number(process.env.SAST_TAINT_RSS_LIMIT_MB)
+  const defaultRssLimit = process.env.NODE_ENV === 'test' ? Number.POSITIVE_INFINITY : 850
+  const taintRssLimit =
+    (Number.isFinite(configuredRssLimit) && configuredRssLimit > 0
+      ? configuredRssLimit
+      : defaultRssLimit) * 1048576
+  let memoryLimitReached = false
+
+  for (const file of files) {
+    const lang = sastLanguageForPath(file.filePath)
+    if (!lang) {
+      filesSkipped++
+      continue
+    }
+    if (memoryLimitReached || process.memoryUsage().rss > taintRssLimit) {
+      memoryLimitReached = true
+      filesSkipped++
+      continue
+    }
+    try {
+      const fileFindings = await scanOne(file.filePath, file.content, lang, degraded, parser, options)
+      if (fileFindings === null) {
+        filesSkipped++
+        continue
+      }
+      filesScanned++
+      if (fileFindings.truncated) truncatedFiles++
+      for (const f of fileFindings.findings) {
+        if (findings.length >= MAX_FINDINGS_PER_SCAN) {
+          findingsTruncated = true
+          break
+        }
+        findings.push(f)
+      }
+      if (process.memoryUsage().rss > taintRssLimit) memoryLimitReached = true
+    } catch {
+      // never let one file crash the scan
+      filesSkipped++
+    }
+  }
+
+  dedupe(findings)
+  sortFindings(findings)
+
+  return {
+    findings,
+    diagnostics: {
+      inputFiles: files.length,
+      filesScanned,
+      filesSkipped,
+      degradedLanguages: [...degraded].sort(),
+      truncatedFiles,
+      findingsTruncated,
+      resourceLimitReached: memoryLimitReached,
+    },
+  }
+}
+
+/** Merge isolated batch results back into the same deterministic contract as a
+ * single in-process scan. Each source file must belong to exactly one retained
+ * batch result; callers discard a memory-truncated parent batch before retrying
+ * its smaller children. */
+export function mergeSastResults(results: SastResult[], inputFiles: number): SastResult {
+  const findings = results.flatMap((result) => result.findings)
+  dedupe(findings)
+  sortFindings(findings)
+  const findingsTruncated =
+    results.some((result) => result.diagnostics.findingsTruncated) ||
+    findings.length > MAX_FINDINGS_PER_SCAN
+  if (findings.length > MAX_FINDINGS_PER_SCAN) findings.length = MAX_FINDINGS_PER_SCAN
+
+  const degradedLanguages = new Set<SastLanguage>()
+  let filesScanned = 0
+  let filesSkipped = 0
+  let truncatedFiles = 0
+  for (const result of results) {
+    filesScanned += result.diagnostics.filesScanned
+    filesSkipped += result.diagnostics.filesSkipped
+    truncatedFiles += result.diagnostics.truncatedFiles
+    for (const language of result.diagnostics.degradedLanguages) degradedLanguages.add(language)
+  }
+
+  return {
+    findings,
+    diagnostics: {
+      inputFiles,
+      filesScanned,
+      filesSkipped,
+      degradedLanguages: [...degradedLanguages].sort(),
+      truncatedFiles,
+      findingsTruncated,
+      resourceLimitReached: results.some((result) => result.diagnostics.resourceLimitReached),
+      budgetExceeded: results.some((result) => result.diagnostics.budgetExceeded),
+      failureReason: results.find((result) => result.diagnostics.failureReason)?.diagnostics.failureReason,
+    },
+  }
+}
+
+interface FileScan {
+  findings: SastFinding[]
+  truncated: boolean
+}
+
+/** Which param indexes of a local function reach which sink. */
+interface ParamSinkRecord {
+  sink: TaintSink
+  node: SyntaxNode
+  line: number
+}
+interface FnRecord {
+  fn: NFunc
+  ft: FunctionTaint
+  /** param index → the sink it reaches (first wins). */
+  sinkParams: Map<number, ParamSinkRecord>
+}
+
+async function scanOne(
+  filePath: string,
+  content: string,
+  lang: SastLanguage,
+  degraded: Set<SastLanguage>,
+  parser: SastParser,
+  options: ScanOptions,
+): Promise<FileScan | null> {
+  const parsed = await parser.parse(lang, content)
+  if (!parsed) {
+    degraded.add(lang)
+    return null
+  }
+
+  const lines = content.split('\n')
+  const loc = (node: SyntaxNode, label: string): CodeLocation & { label: string } => ({
+    filePath,
+    line: node.startPosition.row + 1,
+    column: node.startPosition.column + 1,
+    snippet: snippetAt(lines, node.startPosition.row),
+    label,
+  })
+
+  const findings: SastFinding[] = []
+  const enabled = (id: string) => !options.ruleIds || options.ruleIds.has(id)
+  const applicableSinks = TAINT_SINKS.filter((s) => ruleAppliesTo(s, lang) && enabled(s.id))
+  const applicablePatterns = PATTERN_RULES.filter((p) => ruleAppliesTo(p, lang) && enabled(p.id))
+  const applicableAssignSinks = TAINT_ASSIGN_SINKS.filter((s) => ruleAppliesTo(s, lang) && enabled(s.id))
+
+  let nodeCount = 0
+  let truncated = false
+
+  // ---- gather functions & solve taint per function ----
+  const fnRecords: FnRecord[] = []
+  walk(parsed.rootNode, (node) => {
+    if (++nodeCount > MAX_NODES) {
+      truncated = true
+      return
+    }
+    const fn = asFunction(node, lang)
+    if (fn && fn.body) {
+      const ft = analyzeFunction(fn, lang)
+      fnRecords.push({ fn, ft, sinkParams: new Map() })
+    }
+  })
+
+  // ---- direct sink findings + build interprocedural summaries ----
+  for (const rec of fnRecords) {
+    if (!rec.fn.body) continue
+    walk(rec.fn.body, (node) => {
+      if (findings.length >= MAX_FINDINGS_PER_FILE) return
+      if (isNestedFnBoundary(node, rec.fn, lang)) return
+      // Assignment-shaped sinks (XSS): `__html:` is a JSX pair and
+      // `el.innerHTML =` an assignment, so neither reaches a call-based rule.
+      for (const sink of applicableAssignSinks) {
+        const nv = asNamedValue(node, lang)
+        if (!nv || !sink.matchName(nv.name)) continue
+        if (sink.safeValue?.(nv.value, lang)) continue
+        const origins = taintOf(nv.value, rec.ft)
+        if (!hasRealSource(origins)) continue
+        const src = firstSource(origins)!
+        findings.push(makeAssignFinding(sink, lang, filePath, nv.node, src.node, src.sourceKind, loc, lines))
+      }
+      const call = asCall(node, lang)
+      if (!call) return
+      for (const sink of applicableSinks) {
+        const idxs = sink.match(call, lang)
+        if (!idxs) continue
+        for (const i of idxs) {
+          const arg = call.args[i]
+          if (!arg) continue
+          const origins = taintOf(arg, rec.ft)
+          if (origins.length === 0) continue
+          // Head-position sinks (SSRF): taint confined to path/query segments
+          // of a constant-authority URL cannot steer the request target.
+          if (sink.taintPosition === 'head' && headTaintSuppressed(arg, rec.ft, lang)) continue
+          if (hasRealSource(origins)) {
+            const src = firstSource(origins)!
+            findings.push(makeTaintFinding(sink, lang, filePath, call, src.node, src.sourceKind, false, loc, lines))
+          }
+          for (const pi of paramIndexes(origins)) {
+            if (!rec.sinkParams.has(pi)) rec.sinkParams.set(pi, { sink, node: call.node, line: call.line })
+          }
+        }
+        break // one sink per call site
+      }
+    })
+  }
+
+  // ---- one-hop interprocedural: tainted arg → param that reaches a sink ----
+  const summaries = new Map<string, FnRecord>()
+  for (const rec of fnRecords) {
+    if (rec.sinkParams.size > 0 && !summaries.has(rec.fn.name)) summaries.set(rec.fn.name, rec)
+  }
+  if (summaries.size > 0) {
+    for (const rec of fnRecords) {
+      if (!rec.fn.body) continue
+      walk(rec.fn.body, (node) => {
+        if (findings.length >= MAX_FINDINGS_PER_FILE) return
+        const call = asCall(node, lang)
+        if (!call || call.isConstruct) return
+        if (!bindsToLocalFn(call)) return // don't bind a member call to a same-name local fn
+        const target = summaries.get(call.method)
+        if (!target || target.fn === rec.fn) return
+        for (const [pi, record] of target.sinkParams) {
+          const arg = call.args[pi]
+          if (!arg) continue
+          const origins = taintOf(arg, rec.ft)
+          const src = firstSource(origins)
+          if (!src) continue
+          findings.push(
+            makeInterprocFinding(record.sink, lang, filePath, call, target.fn, record, src.node, src.sourceKind, loc, lines),
+          )
+        }
+      })
+    }
+  }
+
+  // ---- pattern rules (single pass over the whole tree) ----
+  runPatternRules(parsed.rootNode, applicablePatterns, lang, filePath, findings, lines)
+
+  parsed.release()
+  // A drained taint budget means some solve or sink query degraded to
+  // no-taint — real coverage loss, same as the node budget. A tree with error
+  // nodes (parsed.hasError) is still fully walked best-effort, and the
+  // per-file findings cap only bounds OUTPUT — neither degrades coverage.
+  if (fnRecords.some((rec) => taintBudgetExhausted(rec.ft))) truncated = true
+  return { findings, truncated }
+}
+
+/** Pattern-rule pass over a tree. Cheap (no taint), so it always runs even when
+ *  the taint solve is skipped under memory pressure. */
+function runPatternRules(
+  root: SyntaxNode,
+  patterns: typeof PATTERN_RULES,
+  lang: SastLanguage,
+  filePath: string,
+  findings: SastFinding[],
+  lines: string[],
+): void {
+  // Per-rule path exclusion (seed/migration/ops directories where the pattern
+  // is expected and harmless) — resolved once per file, not per node.
+  const activePatterns = patterns.filter((rule) => !rule.excludePath || !rule.excludePath.test(filePath))
+  walk(root, (node) => {
+    if (findings.length >= MAX_FINDINGS_PER_FILE) return
+    for (const rule of activePatterns) {
+      for (const hit of rule.test(node, lang)) {
+        const info = CWE[rule.cweKey]
+        findings.push({
+          ruleId: rule.id,
+          kind: 'pattern',
+          cwe: info.cwe,
+          owasp: info.owasp,
+          severity: rule.severity,
+          title: rule.title,
+          message: rule.message,
+          language: lang,
+          filePath,
+          line: hit.line,
+          column: hit.node.startPosition.column + 1,
+          remediation: rule.remediation,
+          metadata: sortMeta({ detail: hit.detail, snippet: snippetAt(lines, hit.line - 1) }),
+        })
+      }
+    }
+  })
+}
+
+/** A finding for a nested function is handled by that function's own record. */
+function isNestedFnBoundary(node: SyntaxNode, fn: NFunc, lang: SastLanguage): boolean {
+  return node !== fn.node && node !== fn.body && asFunction(node, lang) !== null
+}
+
+/** Constant URL head that pins scheme + authority (`scheme://host/…`) — taint
+ *  after it can only land in the path/query/fragment. */
+const AUTHORITY_PINNED_PREFIX = /^[a-z][a-z0-9+.-]*:\/\/[^\/?#]+[\/?#]/i
+/** Single-slash relative path with a constant character after the slash. A
+ *  lone '/' does NOT qualify: taint abutting it becomes `//host`, which
+ *  fetch/axios treat as protocol-relative and follow off-origin. */
+const SINGLE_SLASH_PATH = /^\/[^\/]/
+/** Constant fragment after the head expression that ends the authority: a
+ *  single '/' starts the path, and '?' or '#' start the query/fragment — past
+ *  any of them a tainted part cannot reach the host. A fragment that is empty
+ *  or starts with ':' or '//' leaves the following part in scheme/authority
+ *  position (`${scheme}://${host}`) and must NOT anchor. */
+const PATH_ANCHOR = /^(\/(?!\/)|[?#])/
+/** A scheme/protocol-relative opener (`http://`, `http://a`, `//`) — when the
+ *  authority-pinning match above failed, the host is still attacker-extendable. */
+const AUTHORITY_OPENER = /^([a-z][a-z0-9+.-]*:)?\/\//i
+
+/**
+ * Position-aware suppression for head-position sinks (SSRF). A URL built as a
+ * template/concat is only attacker-steerable when taint can reach its scheme/
+ * authority: suppress when a constant head pins the authority (or is a
+ * single-slash relative path), or when the head expression is untainted (e.g.
+ * a `${BASE}` config var) and every tainted part lands after a path-anchoring
+ * constant fragment. Deliberately conservative — an empty, protocol-relative
+ * ('//') or incomplete-host ('http://', 'http://a') prefix, or a tainted head,
+ * still flags, and a non-template/concat argument is never suppressed.
+ */
+function headTaintSuppressed(arg: SyntaxNode, ft: FunctionTaint, lang: SastLanguage): boolean {
+  const { constantPrefix, headExpr, parts } = urlHeadOf(arg, lang)
+  if (!parts) return false // opaque expression — the whole argument is the URL
+  if (constantPrefix !== null && (AUTHORITY_PINNED_PREFIX.test(constantPrefix) || SINGLE_SLASH_PATH.test(constantPrefix))) {
+    return true
+  }
+  // An unclosed authority in the constant head ('http://a…') means whatever
+  // follows extends the HOST, not the path — never suppress.
+  if (constantPrefix && AUTHORITY_OPENER.test(constantPrefix)) return false
+  if (headExpr && taintOf(headExpr, ft).length > 0) return false // taint steers the authority
+  // A tainted part is harmless only once a constant fragment AFTER the head
+  // expression path-anchors it. A connecting fragment that could still place
+  // the tainted part in scheme/authority position — empty, ':', '//', '://' —
+  // must not suppress (`${scheme}://${req.query.host}/x` steers the HOST).
+  let pastHead = false
+  let pathAnchored = false
+  for (const part of parts) {
+    if (part.kind === 'const') {
+      if (pastHead && PATH_ANCHOR.test(part.text)) pathAnchored = true
+    } else if (part.node === headExpr) {
+      pastHead = true
+    } else if (!pathAnchored && taintOf(part.node, ft).length > 0) {
+      return false
+    }
+  }
+  return true
+}
+
+function makeTaintFinding(
+  sink: TaintSink,
+  lang: SastLanguage,
+  filePath: string,
+  call: NCall,
+  sourceNode: SyntaxNode,
+  sourceKind: string,
+  interprocedural: boolean,
+  loc: (n: SyntaxNode, label: string) => CodeLocation & { label: string },
+  lines: string[],
+): SastFinding {
+  const info = CWE[sink.cweKey]
+  const source = loc(sourceNode, `untrusted input (${sourceKind})`)
+  const sinkLoc = loc(call.node, `${call.fullName}()`)
+  const flow: Flow = {
+    source,
+    sink: sinkLoc,
+    steps: [source, sinkLoc],
+    summary: `${sourceKind} → ${call.fullName}()`,
+    interprocedural,
+  }
+  // A same-line source→sink is one expression, not a two-hop journey.
+  const sameLine = source.filePath === sinkLoc.filePath && source.line === sinkLoc.line
+  return {
+    ruleId: sink.id,
+    kind: 'taint',
+    cwe: info.cwe,
+    owasp: info.owasp,
+    severity: sink.severity,
+    title: sink.title,
+    message: sameLine
+      ? `${sink.message} Untrusted data from ${sourceKind} reaches ${call.fullName}() in the same expression (line ${sinkLoc.line}).`
+      : `${sink.message} Untrusted data from ${sourceKind} (line ${source.line}) reaches ${call.fullName}() at line ${sinkLoc.line}.`,
+    language: lang,
+    filePath,
+    line: call.line,
+    column: call.node.startPosition.column + 1,
+    flow,
+    remediation: sink.remediation,
+    metadata: sortMeta({ sourceKind, sink: call.fullName, snippet: snippetAt(lines, call.line - 1) }),
+  }
+}
+
+/** Finding for an assignment-shaped sink, where the location is the binding. */
+function makeAssignFinding(
+  sink: TaintAssignSink,
+  lang: SastLanguage,
+  filePath: string,
+  sinkNode: SyntaxNode,
+  sourceNode: SyntaxNode,
+  sourceKind: string,
+  loc: (n: SyntaxNode, label: string) => CodeLocation & { label: string },
+  lines: string[],
+): SastFinding {
+  const info = CWE[sink.cweKey]
+  const source = loc(sourceNode, `untrusted input (${sourceKind})`)
+  const sinkLoc = loc(sinkNode, sink.title)
+  const flow: Flow = {
+    source,
+    sink: sinkLoc,
+    steps: [source, sinkLoc],
+    summary: `${sourceKind} -> raw HTML`,
+    interprocedural: false,
+  }
+  const sameLine = source.filePath === sinkLoc.filePath && source.line === sinkLoc.line
+  return {
+    ruleId: sink.id,
+    kind: 'taint',
+    cwe: info.cwe,
+    owasp: info.owasp,
+    severity: sink.severity,
+    title: sink.title,
+    message: sameLine
+      ? `${sink.message} Untrusted data from ${sourceKind} is assigned to a raw-HTML binding in the same expression (line ${sinkLoc.line}).`
+      : `${sink.message} Untrusted data from ${sourceKind} (line ${source.line}) is assigned to a raw-HTML binding at line ${sinkLoc.line}.`,
+    language: lang,
+    filePath,
+    line: sinkLoc.line,
+    column: sinkNode.startPosition.column + 1,
+    flow,
+    remediation: sink.remediation,
+    metadata: sortMeta({ sourceKind, sink: 'raw HTML', snippet: snippetAt(lines, sinkLoc.line - 1) }),
+  }
+}
+
+function makeInterprocFinding(
+  sink: TaintSink,
+  lang: SastLanguage,
+  filePath: string,
+  call: NCall,
+  callee: NFunc,
+  record: ParamSinkRecord,
+  sourceNode: SyntaxNode,
+  sourceKind: string,
+  loc: (n: SyntaxNode, label: string) => CodeLocation & { label: string },
+  lines: string[],
+): SastFinding {
+  const info = CWE[sink.cweKey]
+  const source = loc(sourceNode, `untrusted input (${sourceKind})`)
+  const callSite = loc(call.node, `${call.method}(…) → ${callee.name}()`)
+  const sinkLoc = loc(record.node, `${sink.title} in ${callee.name}()`)
+  const flow: Flow = {
+    source,
+    sink: sinkLoc,
+    steps: [source, callSite, sinkLoc],
+    summary: `${sourceKind} → ${callee.name}(…) → sink in ${callee.name}() (line ${sinkLoc.line})`,
+    interprocedural: true,
+  }
+  return {
+    ruleId: sink.id,
+    kind: 'taint',
+    cwe: info.cwe,
+    owasp: info.owasp,
+    severity: sink.severity,
+    title: sink.title,
+    message: `${sink.message} Untrusted data from ${sourceKind} (line ${source.line}) is passed to ${callee.name}() and reaches ${sink.title.toLowerCase()} at line ${sinkLoc.line}.`,
+    language: lang,
+    filePath,
+    line: call.line,
+    column: call.node.startPosition.column + 1,
+    flow,
+    remediation: sink.remediation,
+    metadata: sortMeta({ sourceKind, callee: callee.name, sinkLine: sinkLoc.line, snippet: snippetAt(lines, call.line - 1) }),
+  }
+}
+
+function snippetAt(lines: string[], row: number): string | undefined {
+  const raw = lines[row]
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  return trimmed.length > 200 ? trimmed.slice(0, 200) + '…' : trimmed
+}
+
+/** Deterministic metadata ordering so findings serialize identically each run. */
+function sortMeta(meta: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const k of Object.keys(meta).sort()) {
+    if (meta[k] !== undefined) out[k] = meta[k]
+  }
+  return out
+}
+
+const SEV_RANK: Record<SastFinding['severity'], number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }
+
+/** Stable, severity-then-location ordering — deterministic across runs. */
+function sortFindings(findings: SastFinding[]): void {
+  findings.sort(
+    (a, b) =>
+      SEV_RANK[b.severity] - SEV_RANK[a.severity] ||
+      a.filePath.localeCompare(b.filePath) ||
+      a.line - b.line ||
+      a.ruleId.localeCompare(b.ruleId) ||
+      (a.column ?? 0) - (b.column ?? 0),
+  )
+}
+
+/** Collapse identical (rule, file, line) findings that different passes emit. */
+function dedupe(findings: SastFinding[]): void {
+  const seen = new Set<string>()
+  let w = 0
+  for (let r = 0; r < findings.length; r++) {
+    const f = findings[r]
+    const key = `${f.ruleId}|${f.filePath}|${f.line}|${f.column ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    findings[w++] = f
+  }
+  findings.length = w
+}

@@ -5,8 +5,8 @@ The deterministic first-pass verification gate for AI-written code.
 An agent finishes a change. Something has to look at it before a human does.
 CodeTruss Boundary is that first pass: it captures an exact before/after Git
 evidence pair, checks the change against the task contract you declared, runs 13
-deterministic analyzers and your own project checks, then signs a `PASS`,
-`REVIEW_REQUIRED`, or `FAILED` receipt you can re-verify later.
+deterministic analyzers, a local security pass, and your own project checks, then
+signs a `PASS`, `REVIEW_REQUIRED`, or `FAILED` receipt you can re-verify later.
 
 Routine changes clear the checks and pass. Material changes escalate for human
 sign-off. Every verdict leaves a receipt that records the reasons, and the
@@ -44,7 +44,7 @@ To pin an exact version, install the immutable archive directly:
 
 ```bash
 npm install --global --ignore-scripts --no-audit --no-fund \
-  https://codetruss.com/downloads/codetruss-cli-0.2.30.tgz
+  https://codetruss.com/downloads/codetruss-cli-0.2.36.tgz
 ```
 
 The `@codetruss/cli` package on the npm registry is published as a separate,
@@ -59,8 +59,10 @@ codetruss verify latest
 ```
 
 That first receipt needs no account and no configuration. Without an allow
-policy every changed file is deliberately unexpected, so the review exits `1`
-with `REVIEW_REQUIRED` and still writes valid signed evidence.
+policy CodeTruss infers the scope of the turn, marks each file that inference
+covers `allowed (inferred)`, and discloses on the receipt that it did so, which
+keeps a first run readable as signal instead of blanket scope drift. Anything
+the inference does not cover is still unexpected.
 
 Run `codetruss setup` once at the Git root to make it automatic. It proposes
 conventional source roots rather than repository-wide access, shows any detected
@@ -126,8 +128,6 @@ detected verification commands are trusted to run. `verify-policy trust-key`
 is separate: it appends your local signing key to `signing.publicKeys` so a
 teammate can sign receipts as themselves instead of sharing a private key.
 Commit `.codetruss.yml` afterward so the rest of the team inherits the change.
-It is accepted by the CLI but omitted from the built-in `--help` banner in
-0.2.30.
 
 ## Fail-closed policy
 
@@ -175,14 +175,14 @@ The verdict is not a confidence score.
 Receipts are written as Markdown and JSON next to hashed patch evidence, and can
 be rechecked later with `codetruss verify latest`. Every receipt states the
 detection gaps in its own body, so a `PASS` is never mistaken for a security
-clearance. Abridged from a real 0.2.30 run:
+clearance. Abridged from a real 0.2.36 run:
 
 ```markdown
 # CodeTruss receipt — REVIEW_REQUIRED
 
 - **Task:** Fix auth callback validation
-- **Evidence trees:** `f8c28a26…` → `52fdebbe…`
-- **Policy SHA-256:** `368f88df…`
+- **Evidence trees:** `a2303191…` → `0f481c3c…`
+- **Policy SHA-256:** `82db19fe…`
 
 ## Verdict: REVIEW_REQUIRED
 
@@ -191,31 +191,63 @@ clearance. Abridged from a real 0.2.30 run:
 
 ## Analysis profile
 
-Profile: `local-registry-v1`.
+Profile: `local-registry-v2`.
 
-The 13 deterministic registry analyzers ran locally on this machine.
+The 13 deterministic registry analyzers ran locally on this machine, plus a
+local security pass: the shared SAST engine — the same rules and the same
+source-to-sink taint tracking as the hosted audit — over the JavaScript,
+TypeScript and TSX in this repository.
+
+### What the local security pass checked
+
+- **SQL injection (CWE-89).** Untrusted input tracked from request sources
+  through string building into query execution.
+- **Mass assignment (CWE-915).** A raw request body spread into a database
+  write, and write helpers whose payload type accepts arbitrary keys.
+- **Un-awaited database writes, swallowed errors, coercion-prone `==`
+  comparisons, and N+1 queries in loops** — the defect classes coding agents
+  most often introduce.
 
 ### What did not run
 
-- **Security static analysis (SAST).** No injection or taint analysis was
-  performed. SQL injection, command injection, code injection, path traversal,
-  SSRF, open redirect, XSS and insecure deserialization were never checked.
+- **The rest of the security rule pack.** Command injection, code injection,
+  path traversal, SSRF, open redirect, XSS and insecure deserialization were
+  **not** checked here.
+- **Non-JavaScript languages.** The local pass covers JavaScript, TypeScript
+  and TSX only.
 - **Hosted symbol graph.** No cross-file call or data-flow graph was built.
+- **Optional LLM review.** No model read this diff.
 - **Hosted Health scores.** Not calculated, reported as **N/A**.
+
+Local security findings are reported for review and do not fail the verdict on
+their own.
 
 A PASS verdict means the passes listed above never ran and the passes that did
 run found nothing new. It is not a statement that this change is secure.
 ```
 
-SAST and the symbol graph are hosted-only. A local run never performs injection
-or taint analysis.
+Since 0.2.35 the security rule pack and its taint solver run locally and
+offline over JavaScript, TypeScript and TSX — the same engine as the hosted
+audit, not a reimplementation. The rest of the rule pack, every other language,
+and the symbol graph remain hosted-only, and the receipt names them rather than
+leaving their absence to be inferred. Local security findings are
+`REVIEW_REQUIRED` at most; they never fail a verdict on their own.
+
+Where a finding's own evidence determines a single correct change, the receipt
+also carries a **Suggested fixes** section with a diff and a required safety
+note. Nothing is ever applied, written, or run. A committed credential is shown
+with its value masked, so that diff cannot apply cleanly by design and the note
+leads with rotation.
 
 ## Measured accuracy
 
 On a nine-case adversarial corpus of AI-agent bug classes, the analyzers caught
-five at the exact file and line, with zero false positives across eight
-repositories. The four misses are named, each with the reason it needs dataflow
-analysis the local passes do not perform.
+six at the exact file and line, with zero false positives across 177,703 lines
+in eight repositories. The three misses are named, each with the reason a rule
+that caught it would fire on legitimate code more often than on the bug.
+
+The read-modify-write race was published as a miss and now sits in the caught
+half: it moved because the rule shipped, not because the bar moved.
 
 Method, per-case reasoning, and the misses are published at
 [codetruss.com/benchmark](https://codetruss.com/benchmark).
@@ -281,8 +313,8 @@ clean global install.
 Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-0.2.30.tgz --repo DeliriumPulse/codetruss-cli
-shasum -a 256 -c codetruss-cli-0.2.30.tgz.sha256
+gh attestation verify codetruss-cli-0.2.36.tgz --repo DeliriumPulse/codetruss-cli
+shasum -a 256 -c codetruss-cli-0.2.36.tgz.sha256
 ```
 
 Maintainers should follow [docs/RELEASE.md](docs/RELEASE.md). Tag-driven GitHub

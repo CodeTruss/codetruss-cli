@@ -7,6 +7,7 @@ import { loadSigningKey, requireTrustedSigningKey } from '../src/signing.js'
 import {
   APPROVED_RECEIPT_DIR,
   PRODUCTION_SYNC_ORIGIN,
+  detectVerifyCommands,
   initialize,
   loadConfig,
   receiptDir,
@@ -62,6 +63,46 @@ describe('initialization', () => {
     const configText = await readFile(join(root, '.codetruss.yml'), 'utf8')
     expect(configText).not.toContain('pnpm lint')
     expect(configText).not.toContain('sync:')
+  })
+
+  it('collects lint and test for every Node package manager, not just pnpm', async () => {
+    // npm and yarn repositories were losing their lint script for no reason
+    // other than which lockfile they happen to commit.
+    const scripts = { scripts: { lint: 'eslint .', test: 'vitest run', dev: 'next dev' } }
+    const withLockfile = async (name: string) => {
+      const root = await mkdtemp(join(tmpdir(), 'codetruss-detect-verify-'))
+      await writeFile(join(root, 'package.json'), `${JSON.stringify(scripts)}\n`)
+      await writeFile(join(root, name), '\n')
+      return detectVerifyCommands(root)
+    }
+
+    expect((await withLockfile('pnpm-lock.yaml')).candidates).toEqual(['pnpm lint', 'pnpm test'])
+    // `npm lint` is not a command — only lifecycle names run without `run`.
+    expect((await withLockfile('package-lock.json')).candidates).toEqual(['npm run lint', 'npm run test'])
+    expect((await withLockfile('yarn.lock')).candidates).toEqual(['yarn lint', 'yarn test'])
+  })
+
+  it('names the missing lockfile as the reason detection found nothing', async () => {
+    // "No verification commands were detected" reads as "this repository has no
+    // tests" even when package.json defines them and only the lockfile is absent.
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-detect-no-lockfile-'))
+    await writeFile(
+      join(root, 'package.json'),
+      `${JSON.stringify({ scripts: { lint: 'eslint .', test: 'vitest run' } })}\n`,
+    )
+
+    await expect(detectVerifyCommands(root)).resolves.toEqual({
+      commands: [],
+      candidates: ['lint', 'test'],
+      blocker: 'missing-lockfile',
+    })
+  })
+
+  it('claims no candidates when the repository genuinely defines none', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-detect-empty-'))
+    await writeFile(join(root, 'package.json'), `${JSON.stringify({ scripts: { dev: 'next dev' } })}\n`)
+
+    await expect(detectVerifyCommands(root)).resolves.toEqual({ commands: [], candidates: [] })
   })
 
   it('never accepts a repository-selected bearer-token destination', async () => {
