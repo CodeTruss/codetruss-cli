@@ -438,6 +438,61 @@ describe('hook installation', () => {
     }
   })
 
+  it('names the drifted fields and the remedy when an installed agent handler is stale', async () => {
+    // The repository's own .codex/hooks.json sat several CLI versions behind
+    // the installer: no `core.longpaths=true` in the command, and a Stop
+    // timeout of 300 where the installer had moved to 360. Doctor caught it,
+    // but said only "differs" — indistinguishable from a deliberate hand-edit,
+    // and with no command to run next.
+    const root = await repo()
+    await writeConfig(root)
+    const bin = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'codetruss.cmd' : 'codetruss')
+    await mkdir(dirname(bin), { recursive: true })
+    await writeFile(bin, process.platform === 'win32' ? '@exit /b 0\r\n' : '#!/bin/sh\nexit 0\n')
+    await chmod(bin, 0o755)
+    await installHooks(root, 'codex')
+
+    const path = join(root, '.codex', 'hooks.json')
+    const document = JSON.parse(await readFile(path, 'utf8')) as {
+      hooks: Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>>
+    }
+    const staleHandler = (event: string) => document.hooks[event]
+      .flatMap((group) => group.hooks)
+      .find((handler) => String(handler.command).includes('.codetruss/hooks/agent.cjs'))!
+    const stop = staleHandler('Stop')
+    stop.timeout = 300
+    stop.command = String(stop.command).replace(' -c core.longpaths=true', '')
+    stop.commandWindows = String(stop.commandWindows).replace(' -c core.longpaths=true', '')
+    staleHandler('UserPromptSubmit').statusMessage = 'Capturing baseline'
+    document.hooks.PostToolUse[0].matcher = 'Edit'
+    await writeFile(path, `${JSON.stringify(document, null, 2)}\n`)
+
+    const doctor = await inspectHookDoctor(root, 'codex')
+    expect(doctor.ok).toBe(false)
+    const drifted = (event: string) => doctor.checks
+      .find((check) => check.target === 'codex' && check.message.startsWith(`${event} handler differs`))
+    expect(drifted('Stop')?.message).toBe(
+      'Stop handler differs from the current safe installation (command, commandWindows, timeout);'
+      + ' run codetruss hooks install codex to refresh it',
+    )
+    expect(drifted('UserPromptSubmit')?.message).toBe(
+      'UserPromptSubmit handler differs from the current safe installation (statusMessage);'
+      + ' run codetruss hooks install codex to refresh it',
+    )
+    expect(drifted('PostToolUse')?.message).toBe(
+      'PostToolUse handler differs from the current safe installation (matcher);'
+      + ' run codetruss hooks install codex to refresh it',
+    )
+    for (const event of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
+      expect(drifted(event)?.level).toBe('error')
+    }
+
+    // Reinstalling is the remedy the message names, so it must actually work.
+    await installHooks(root, 'codex')
+    const repaired = await inspectHookDoctor(root, 'codex')
+    expect(repaired.checks.filter((check) => check.message.includes('handler differs'))).toEqual([])
+  })
+
   it('warns when an older install shadows the codetruss the hooks will run', async () => {
     // D6: the installer's readiness check was a bare `command -v codetruss`,
     // which succeeds just as happily when an older binary sits earlier in PATH.

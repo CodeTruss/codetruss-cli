@@ -1,6 +1,6 @@
 {
   "name": "@codetruss/cli",
-  "version": "0.2.40",
+  "version": "0.2.41",
   "description": "Local-first scope, quality, and verification receipts for coding agents",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -21,11 +21,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DeliriumPulse/codetruss-cli.git"
+    "url": "git+https://github.com/CodeTruss/codetruss-cli.git"
   },
   "homepage": "https://codetruss.com/cli",
   "bugs": {
-    "url": "https://github.com/DeliriumPulse/codetruss-cli/issues"
+    "url": "https://github.com/CodeTruss/codetruss-cli/issues"
   },
   "keywords": [
     "ai-agent",
@@ -42,7 +42,8 @@
     "build": "node scripts/build.mjs",
     "release:artifact": "node scripts/build-release.mjs",
     "verify:artifact": "node scripts/verify-release.mjs",
-    "release:grammars": "node scripts/build-grammar-packs.mjs",
+    "release:grammars": "node scripts/attest-grammar-sources.mjs && node scripts/build-grammar-packs.mjs",
+    "attest:grammars": "node scripts/attest-grammar-sources.mjs",
     "verify:grammars": "node scripts/verify-grammar-packs.mjs",
     "test:install": "node scripts/test-install.mjs",
     "prepack": "pnpm build",

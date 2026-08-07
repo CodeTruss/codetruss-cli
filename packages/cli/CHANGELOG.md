@@ -5,6 +5,83 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.41 — 2026-08-07
+
+- **You can dismiss a finding you have judged wrong, in the place the judgement
+  belongs.** A `codetruss-ignore: <reason>` comment on a finding's own line, or
+  on a comment-only line directly above it, marks that finding as dismissed. A
+  marker trailing a line of code governs only that line, so it can never reach a
+  neighbouring finding its author never looked at. **A dismissal never deletes
+  anything.** The finding, its location, and the exact reason its author gave
+  all survive into the signed receipt under a "Suppressed findings" heading, and
+  the reader decides whether the reason is good — a receipt whose evidence could
+  be erased by editing a comment would not be evidence, and "nothing was found"
+  must never be reachable that way. The reason is mandatory for the same reason:
+  the reason *is* the output, and "someone decided this was fine" is not
+  evidence. A bare `codetruss-ignore` therefore dismisses nothing and is
+  reported by location, so a developer who wrote one finds out why it did
+  nothing. Receipts that dismissed nothing are unchanged, byte for byte.
+- **Python SQL injection is now caught through a cursor held in a local.**
+  `cur = conn.cursor()` then `cur.execute(f"... {user_input}")` — the canonical
+  psycopg/sqlite3/MySQLdb two-step — was invisible, because the sink test was
+  lexical and `cur` does not read as a database receiver. The receiver is now
+  resolved to its binding, so a name bound to a `.cursor()` call counts however
+  it is spelled, including `with conn.cursor() as cur:`. `executemany` joins
+  `execute`; `exec` stays name-gated, since a bare `.exec()` is far more often
+  `RegExp.prototype.exec` than SQL. Generic receiver names were not loosened, so
+  nothing else lost precision.
+- **A stalled grammar-pack download now fails with a sentence instead of
+  hanging.** `codetruss grammars install` is a foreground command someone is
+  watching, and `fetch` will wait out a server that writes one byte and holds
+  the socket open forever. Two clocks bound it — a whole-transfer budget and an
+  idle budget — and the reason it was abandoned survives into the error, rather
+  than the bare "This operation was aborted" an abort produces on its own. Both
+  are generous enough that a slow connection is never mistaken for a hostile
+  origin.
+- **A grammar pack's artifacts are bound by role, not by name prefix.** The
+  loader picked the first file whose name started with `tree-sitter-`, so a pack
+  carrying an extra artifact ordered ahead of the real grammar would have had
+  the extra one loaded — and the pin verifier, which only proved each digest
+  appeared somewhere, would not have caught it. Each role must now be filled by
+  exactly one pinned artifact; an ambiguous pack does not resolve at all. A pack
+  that fails this reports a runtime failure rather than a digest failure, so a
+  defect in the CLI's own pin never publishes a receipt accusing the user's
+  install of tampering.
+- **`SECURITY.md` now states what the grammar-pack digest pin does not cover.**
+  The pin protects against a compromised download origin, which is what it was
+  built for. It cannot protect against a compromised build: the pin, the
+  published artifact, and the offline check that compares them all derive from
+  the same `node_modules` on the release machine. `pnpm grammars:attest` narrows
+  that window — it checks the lockfile digest against the npm registry, verifies
+  the registry's signature, and compares the downloaded tarball against the
+  files the pack is cut from — and the document says plainly that it does not
+  close it.
+- **`hooks doctor` names which fields drifted and what to run.** It reported
+  only that an installed handler "differs", which reads identically for a config
+  installed several versions ago and a deliberate hand-edit, and named no
+  remedy. It now lists the drifted field names — enough to diagnose, without
+  putting handler command text in the message — and names the reinstall command.
+  This repository's own committed `.codex/hooks.json` was the config that
+  exposed it: several versions stale, missing `core.longpaths=true` and pinned
+  to the old Stop timeout. It has been refreshed, and a test now compares the
+  committed hook configuration against what the installer actually writes, so it
+  cannot drift again unnoticed.
+- **Build attestation is verified against the CodeTruss organisation.** The CLI
+  repository moved from the `DeliriumPulse` account, and every release still in
+  circulation has been re-attested under the organisation, so one command
+  verifies all of them: `gh attestation verify <artifact> --repo
+  CodeTruss/codetruss-cli`. The transferred `--repo DeliriumPulse/…` slug
+  returns HTTP 404 and is no longer advertised anywhere. The published manifest,
+  the verifier, and the verifier's own tests now derive that command from a
+  single module rather than each restating it; the Homebrew tap, plugin
+  marketplace and support links follow the organisation too.
+- **Internal: `hooks.ts` is now seven modules behind an unchanged public
+  surface.** Installation, uninstallation, the doctor, the pre-commit block, the
+  agent handler shapes, the agent runner and executable resolution each have
+  their own file. No behaviour changed, and the hook tests are unmodified by
+  design — an unchanged test suite passing over a moved implementation is the
+  evidence that the move was only a move.
+
 ## 0.2.40 — 2026-08-07
 
 - **Python can now be analyzed locally, if you ask for it.** `codetruss

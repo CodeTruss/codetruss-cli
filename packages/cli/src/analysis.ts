@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { runAnalyzers, type AnalyzerFinding, type AnalyzerPass, type IndexCoverage } from '@codetruss/analyzer-engine'
+import { annotateSuppressions, runAnalyzers, type AnalyzerFinding, type AnalyzerPass, type IndexCoverage } from '@codetruss/analyzer-engine'
 import { CLI_SAST_UNCHECKED_CLASSES } from '@codetruss/analyzer-engine/security/local-profile'
 import { indexRepository } from './indexer.js'
 import { LOCAL_SAST_PASS_ID, runLocalSast } from './local-sast.js'
@@ -18,9 +18,17 @@ export async function analyzeRepository(root: string) {
       sastUncheckedClasses: CLI_SAST_UNCHECKED_CLASSES,
     })
     const localSast = await runLocalSast(index)
+    // Inline `codetruss-ignore` markers are read once, over every pass at once,
+    // so no analyzer can be added later and quietly miss them — and so the
+    // aggregate list and the per-pass lists cannot disagree about what a
+    // developer dismissed. The findings are annotated, never removed.
+    const passes = [...result.passes, localSast.pass].map((pass) => ({
+      ...pass,
+      result: { ...pass.result, findings: annotateSuppressions(pass.result.findings, index) },
+    }))
     return {
-      findings: [...result.findings, ...localSast.findings],
-      passes: [...result.passes, localSast.pass],
+      findings: passes.flatMap((pass) => pass.result.findings),
+      passes,
       index,
     }
   } finally {
@@ -183,6 +191,26 @@ export function changedFindings(findings: AnalyzerFinding[], files: ChangedFile[
   })
 }
 
+/** Findings a developer dismissed with an inline `codetruss-ignore: <reason>` comment. */
+export function suppressedFindings(findings: AnalyzerFinding[]): AnalyzerFinding[] {
+  return findings.filter((finding) => finding.suppression?.applied)
+}
+
+/**
+ * Findings that still count. A marker without a reason suppresses nothing, so
+ * its finding stays here — the rejected marker is disclosed separately.
+ */
+export function reportedFindings(findings: AnalyzerFinding[]): AnalyzerFinding[] {
+  return findings.filter((finding) => !finding.suppression?.applied)
+}
+
+/** `path:line` of every marker that gave no reason, deduplicated for disclosure. */
+export function rejectedSuppressionSites(findings: AnalyzerFinding[]): string[] {
+  return [...new Set(findings
+    .filter((finding) => finding.suppression && !finding.suppression.applied)
+    .map((finding) => `${finding.filePath ?? ''}:${finding.suppression?.markerLine ?? 0}`))].sort()
+}
+
 export function computeVerdict(input: {
   agentExitCode?: number
   verifications: VerificationResult[]
@@ -213,14 +241,19 @@ export function computeVerdict(input: {
    * does not grant it. Promotion is a deliberate later change, not a default.
    */
   const isLocalSast = (finding: AnalyzerFinding) => finding.analyzerId === LOCAL_SAST_PASS_ID
-  const blocking = input.findings.filter(
+  // A dismissed finding stops gating — that is what dismissing it is for. It
+  // does NOT stop being evidence: it is listed with its reason on the receipt,
+  // and a PASS reached over one says so in its own reasons below.
+  const dismissed = suppressedFindings(input.findings)
+  const findings = reportedFindings(input.findings)
+  const blocking = findings.filter(
     (finding) =>
       severityRank[finding.severity] >= severityRank.HIGH &&
       (finding.category === 'SECURITY_HYGIENE' || finding.category === 'DEPENDENCY') &&
       !isLocalSast(finding),
   )
   if (blocking.length) failed.push(`${blocking.length} high/critical security or dependency finding(s) affect changed files`)
-  const localSastFindings = input.findings.filter(isLocalSast)
+  const localSastFindings = findings.filter(isLocalSast)
   if (localSastFindings.length) {
     const rules = [...new Set(localSastFindings.map((finding) => String(finding.metadata?.ruleId ?? 'security')))].sort()
     review.push(`${localSastFindings.length} local security finding(s) affect changed files (${rules.join(', ')})`)
@@ -235,10 +268,13 @@ export function computeVerdict(input: {
   if (sensitive.length) review.push(`sensitive surfaces changed: ${sensitive.slice(0, 5).map((file) => `${file.path} (${file.sensitive})`).join(', ')}`)
   if (deps.length) review.push(`dependency manifests or lockfiles changed: ${deps.slice(0, 5).map((file) => file.path).join(', ')}`)
   if (input.startDirty) review.push('the working tree was dirty at session start, so exact agent attribution is uncertain')
-  const reviewFindings = input.findings.filter(
+  const reviewFindings = findings.filter(
     (finding) => severityRank[finding.severity] >= severityRank.MEDIUM && !blocking.includes(finding) && !isLocalSast(finding),
   )
   if (reviewFindings.length) review.push(`${reviewFindings.length} medium-or-higher analyzer finding(s) affect changed files`)
+  if (dismissed.length) {
+    notes.push(`${dismissed.length} finding(s) on changed files were dismissed by an inline codetruss-ignore comment and are listed with their reasons on this receipt`)
+  }
   if (input.llm?.diffCoverage?.truncated) {
     review.push(`local ${input.llm.provider} review covered ${input.llm.diffCoverage.reviewedBytes} of ${input.llm.diffCoverage.totalBytes} diff bytes`)
   }
@@ -264,9 +300,19 @@ export function analyzerReceipt(
   _baseline?: Awaited<ReturnType<typeof analyzeRepository>>,
   delta?: FindingDelta,
 ): Receipt['analyzers'] {
+  const relevant = delta ? [...delta.introduced, ...delta.worsened] : analysis.findings
+  // Dismissals are reported for the WHOLE repository, not only the delta. A
+  // marker written in an unchanged file is a standing instruction to look away,
+  // and a receipt that only mentioned the ones touched this turn would let the
+  // rest accumulate unseen. Both lists are omitted when empty, so a repository
+  // that dismisses nothing renders exactly the bytes it did before.
+  const suppressed = suppressedFindings(analysis.findings)
+  const rejected = rejectedSuppressionSites(analysis.findings)
   return {
     passes: analysis.passes,
-    findings: delta ? [...delta.introduced, ...delta.worsened] : analysis.findings,
+    findings: reportedFindings(relevant),
+    ...(suppressed.length ? { suppressed } : {}),
+    ...(rejected.length ? { rejectedSuppressions: rejected } : {}),
     analysisProfile: LOCAL_ANALYSIS_PROFILE,
     delta: delta ? {
       introduced: delta.introduced.length,

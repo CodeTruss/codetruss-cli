@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { assertChangelogPolicy } from './changelog-policy.mjs'
 import { buildDeterministicPackageArchive } from './deterministic-package.mjs'
 import { assertReleasePackagePolicy } from './release-package-policy.mjs'
+import { buildReleaseManifest, serialiseReleaseManifest } from './release-metadata.mjs'
 import { verifyDeterministicPackageArchive } from './verify-deterministic-package.mjs'
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
@@ -73,19 +74,7 @@ try {
   await writeFile(`${latest}.sha256`, `${sha256}  ${latestName}\n`, 'utf8')
   await writeFile(
     join(downloadDir, 'codetruss-cli-latest.json'),
-    `${JSON.stringify({
-      name: pkg.name,
-      version: pkg.version,
-      url: `/downloads/${versionedName}`,
-      latestUrl: `/downloads/${latestName}`,
-      sha256,
-      sbomUrl: `/downloads/${versionedSbomName}`,
-      sbomSha256,
-      node: pkg.engines.node,
-      repository: 'https://github.com/DeliriumPulse/codetruss-cli',
-      releaseUrl: `https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v${pkg.version}`,
-      attestationCommand: `gh attestation verify ${versionedName} --repo DeliriumPulse/codetruss-cli`,
-    }, null, 2)}\n`,
+    serialiseReleaseManifest(buildReleaseManifest({ pkg, sha256, sbomSha256 })),
     'utf8',
   )
 

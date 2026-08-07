@@ -1,6 +1,7 @@
 export * from './types'
 export * from './registry'
 export * from './runner'
+export * from './suppression'
 export * from './scoring'
 export * from './coverage'
 export * from './support'

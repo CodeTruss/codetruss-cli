@@ -38,9 +38,12 @@ import { PINNED_GRAMMAR_PACKS, pinnedGrammarPack, type PinnedGrammarPack } from 
  *    verification or the install somewhere the digest never covered;
  *  - the only origin is the CodeTruss downloads host — never a third-party CDN,
  *    never a redirect off-origin;
- *  - any failure — absent, short, over-long, wrong digest, unreadable — resolves
- *    to "pack unavailable", and the run discloses Python as skipped. There is no
- *    degraded mode in which unverified bytes are executed.
+ *  - a download that stalls is abandoned rather than waited out: an origin that
+ *    never answers, or answers one byte and holds the socket open, ends in an
+ *    error with a reason instead of a hung install;
+ *  - any failure — absent, short, over-long, wrong digest, unreadable, stalled —
+ *    resolves to "pack unavailable", and the run discloses Python as skipped.
+ *    There is no degraded mode in which unverified bytes are executed.
  */
 
 const PRODUCTION_DOWNLOAD_ORIGIN = 'https://codetruss.com'
@@ -280,39 +283,103 @@ export async function inspectGrammarPack(
 }
 
 /**
+ * How long one artifact download may take, and how long it may say nothing.
+ *
+ * Two clocks, because they catch different failures. The total budget bounds a
+ * transfer that is progressing but will not finish; the idle budget catches the
+ * drip feed — a server that writes one byte and then holds the socket open
+ * forever, which no total-only budget shorter than "forever" ever ends, and
+ * which `fetch` on its own will wait out indefinitely. `grammars install` is a
+ * foreground command a person is watching, so an origin that stalls has to fail
+ * with a sentence, not hang.
+ *
+ * The values are generous on purpose: 738 KB over a bad hotel connection is
+ * still well inside them, and a false abort would look exactly like a tampered
+ * download to a user who cannot tell the two apart.
+ */
+export interface GrammarDownloadLimits {
+  /** Whole-transfer budget for one artifact, from request to last byte. */
+  totalMs: number
+  /** Longest silence allowed — between the request and the first byte, or between two chunks. */
+  idleMs: number
+}
+
+const DEFAULT_DOWNLOAD_LIMITS: GrammarDownloadLimits = { totalMs: 120_000, idleMs: 20_000 }
+
+/**
  * Download one artifact into `target`, verifying as the bytes arrive.
  *
  * The pinned length is enforced DURING the stream rather than after it, so a
  * hostile or broken origin cannot fill the user's disk before the digest gets a
  * chance to disagree.
+ *
+ * Both deadlines drive one `AbortController` rather than `AbortSignal.timeout`
+ * so the reason the transfer was abandoned survives into the error: an aborted
+ * `fetch` reports only "This operation was aborted", which tells a user nothing
+ * about whether their network stalled or the origin is misbehaving.
  */
-async function downloadVerified(url: string, target: string, expected: { bytes: number; sha256: string }): Promise<void> {
-  const response = await fetch(url, { redirect: 'error', headers: { accept: 'application/octet-stream' } })
-  if (!response.ok) throw new Error(`${url} responded ${response.status}`)
-  if (!response.body) throw new Error(`${url} returned no body`)
+async function downloadVerified(
+  url: string,
+  target: string,
+  expected: { bytes: number; sha256: string },
+  limits: GrammarDownloadLimits,
+): Promise<void> {
+  const controller = new AbortController()
+  /** Set only when a deadline fired, so an abort is reported as itself. */
+  let abandoned: string | undefined
+  const abandon = (reason: string) => {
+    if (abandoned) return
+    abandoned = reason
+    controller.abort()
+  }
+  const total = setTimeout(() => abandon(`${url} did not finish within ${limits.totalMs}ms`), limits.totalMs)
+  let idle: ReturnType<typeof setTimeout> | undefined
+  const restartIdle = () => {
+    clearTimeout(idle)
+    idle = setTimeout(() => abandon(`${url} sent no data for ${limits.idleMs}ms`), limits.idleMs)
+  }
 
-  const hash = createHash('sha256')
-  let received = 0
-  const measured = new Readable({ read() {} })
-  const source = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])
-  source.on('data', (chunk: Buffer) => {
-    received += chunk.length
-    if (received > expected.bytes) {
-      measured.destroy(new Error(`${url} sent more than the pinned ${expected.bytes} bytes`))
-      source.destroy()
-      return
-    }
-    hash.update(chunk)
-    measured.push(chunk)
-  })
-  source.on('end', () => measured.push(null))
-  source.on('error', (error: Error) => measured.destroy(error))
+  try {
+    // Started before the request, so a server that accepts the connection and
+    // never answers is on the same clock as one that stalls mid-body.
+    restartIdle()
+    const response = await fetch(url, {
+      redirect: 'error',
+      headers: { accept: 'application/octet-stream' },
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(`${url} responded ${response.status}`)
+    if (!response.body) throw new Error(`${url} returned no body`)
 
-  await pipeline(measured, createWriteStream(target, { mode: 0o600 }))
+    const hash = createHash('sha256')
+    let received = 0
+    const measured = new Readable({ read() {} })
+    const source = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])
+    source.on('data', (chunk: Buffer) => {
+      restartIdle()
+      received += chunk.length
+      if (received > expected.bytes) {
+        measured.destroy(new Error(`${url} sent more than the pinned ${expected.bytes} bytes`))
+        source.destroy()
+        return
+      }
+      hash.update(chunk)
+      measured.push(chunk)
+    })
+    source.on('end', () => measured.push(null))
+    source.on('error', (error: Error) => measured.destroy(error))
 
-  if (received !== expected.bytes) throw new Error(`${url} sent ${received} bytes, expected ${expected.bytes}`)
-  const digest = hash.digest('hex')
-  if (digest !== expected.sha256) throw new Error(`${url} has digest ${digest}, expected ${expected.sha256}`)
+    await pipeline(measured, createWriteStream(target, { mode: 0o600 }))
+
+    if (received !== expected.bytes) throw new Error(`${url} sent ${received} bytes, expected ${expected.bytes}`)
+    const digest = hash.digest('hex')
+    if (digest !== expected.sha256) throw new Error(`${url} has digest ${digest}, expected ${expected.sha256}`)
+  } catch (error) {
+    throw abandoned ? new Error(abandoned) : error
+  } finally {
+    clearTimeout(total)
+    clearTimeout(idle)
+  }
 }
 
 /**
@@ -358,6 +425,7 @@ export interface GrammarInstallResult {
 export async function installGrammarPack(
   name: string,
   env: NodeJS.ProcessEnv = process.env,
+  limits: GrammarDownloadLimits = DEFAULT_DOWNLOAD_LIMITS,
 ): Promise<GrammarInstallResult> {
   const existing = await inspectGrammarPack(name, env)
   const pack = existing.pack
@@ -375,7 +443,7 @@ export async function installGrammarPack(
   const scratch = await mkdtemp(join(root, `.${pack.name}-${pack.version}.`))
   try {
     for (const file of pack.files) {
-      await downloadVerified(`${origin}${file.url}`, join(scratch, file.name), file)
+      await downloadVerified(`${origin}${file.url}`, join(scratch, file.name), file, limits)
     }
     const target = grammarPackDir(pack, env)
     // A failed or partial previous install is replaced wholesale rather than

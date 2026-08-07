@@ -5,6 +5,7 @@ import { compileFunction } from 'node:vm'
 import type { ParsedTree, SastLanguage, SastParser, SyntaxNode } from '@codetruss/analyzer-engine/security/lang'
 import { MAX_SOURCE_BYTES } from '@codetruss/analyzer-engine/security/lang'
 import { inspectGrammarPack, type GrammarPackState } from './grammar-pack.js'
+import type { PinnedGrammarFile, PinnedGrammarPack } from './grammar-pack-manifest.js'
 
 /**
  * Turn a verified grammar pack into the {@link SastParser} the engine expects.
@@ -101,17 +102,58 @@ export async function loadGrammarParser(
   if (state.status === 'failed') return { status: 'failed', kind: 'digest', reason: state.reason }
 
   const language = state.pack.language as SastLanguage
-  const grammarFile = state.pack.files.find((file) => file.name.startsWith('tree-sitter-'))
-  if (!grammarFile) return { status: 'failed', kind: 'digest', reason: 'pack declares no grammar artifact' }
+  const artifacts = artifactsByRole(state.pack)
+  if ('reason' in artifacts) {
+    // The pack verified; the CLI's own pin is malformed. Calling that a digest
+    // failure would publish a receipt accusing the user's install of tampering
+    // over a defect in this binary.
+    return { status: 'failed', kind: 'runtime', reason: artifacts.reason }
+  }
 
   let cached = runtimeCache.get(state.dir)
   if (!cached) {
-    cached = buildParser(state, grammarFile.name, language)
+    cached = buildParser(state, artifacts, language)
     runtimeCache.set(state.dir, cached)
   }
   const result = await cached
   if ('reason' in result) return { status: 'failed', kind: 'runtime', reason: result.reason }
   return { status: 'verified', parser: result.parser, languages: new Set([language]) }
+}
+
+/** The artifact names this loader will execute, resolved by role. */
+interface PackArtifacts {
+  runtime: string
+  runtimeWasm: string
+  grammar: string
+}
+
+/**
+ * Which artifact fills which role — by the pin's own `role` field, never by the
+ * shape of a file name.
+ *
+ * `files.find((file) => file.name.startsWith('tree-sitter-'))` returned the
+ * FIRST match, so a pack that carried an extra `tree-sitter-evil.wasm` ordered
+ * ahead of `tree-sitter-python.wasm` would have had the extra file loaded as the
+ * grammar — and the pin verifier that only proved each digest appeared somewhere
+ * in the generated file would not have caught the extra entry. Requiring exactly
+ * one artifact per role means an ambiguous pack cannot resolve to "whichever one
+ * came first"; it does not resolve at all.
+ */
+function artifactsByRole(pack: PinnedGrammarPack): PackArtifacts | { reason: string } {
+  const named = (role: PinnedGrammarFile['role']): string | { reason: string } => {
+    const matches = pack.files.filter((file) => file.role === role)
+    if (matches.length !== 1) {
+      return { reason: `pack declares ${matches.length} artifacts for role ${role}, expected exactly one` }
+    }
+    return matches[0].name
+  }
+  const runtime = named('runtime')
+  const runtimeWasm = named('runtime-wasm')
+  const grammar = named('grammar')
+  if (typeof runtime !== 'string') return runtime
+  if (typeof runtimeWasm !== 'string') return runtimeWasm
+  if (typeof grammar !== 'string') return grammar
+  return { runtime, runtimeWasm, grammar }
 }
 
 /**
@@ -153,12 +195,12 @@ function runVerifiedModule(source: Buffer, filename: string, dirname: string): u
 
 async function buildParser(
   state: Extract<GrammarPackState, { status: 'verified' }>,
-  grammarFileName: string,
+  artifacts: PackArtifacts,
   language: SastLanguage,
 ): Promise<{ parser: SastParser } | { reason: string }> {
-  const runtimeSource = state.contents.get('tree-sitter.js')
-  const runtimeWasm = state.contents.get('tree-sitter.wasm')
-  const grammarWasm = state.contents.get(grammarFileName)
+  const runtimeSource = state.contents.get(artifacts.runtime)
+  const runtimeWasm = state.contents.get(artifacts.runtimeWasm)
+  const grammarWasm = state.contents.get(artifacts.grammar)
   if (!runtimeSource || !runtimeWasm || !grammarWasm) {
     return { reason: 'verified pack did not carry its own bytes' }
   }
@@ -167,7 +209,7 @@ async function buildParser(
   try {
     const TreeSitter = runVerifiedModule(
       runtimeSource,
-      join(state.dir, 'tree-sitter.js'),
+      join(state.dir, artifacts.runtime),
       state.dir,
     ) as TreeSitterModule
     if (typeof TreeSitter?.init !== 'function') {

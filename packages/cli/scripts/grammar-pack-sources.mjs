@@ -34,15 +34,19 @@ export const GRAMMAR_PACK_PROVENANCE = {
  * `language` is the {@link SastLanguage} the pack enables. `files` are copied
  * byte-for-byte; nothing is recompiled, minified or repackaged, so a reviewer
  * can diff a published artifact against `node_modules` directly.
+ *
+ * `role` says what the CLI's loader does with an artifact, and is the only thing
+ * it selects on — never the shape of the file name. Exactly one artifact per
+ * role, checked by the loader and by `pnpm grammars:verify`.
  */
 export const GRAMMAR_PACKS = [
   {
     name: 'python',
     language: 'python',
     files: [
-      { name: 'tree-sitter.js', source: ['web-tree-sitter', 'tree-sitter.js'] },
-      { name: 'tree-sitter.wasm', source: ['web-tree-sitter', 'tree-sitter.wasm'] },
-      { name: 'tree-sitter-python.wasm', source: ['tree-sitter-wasms', 'out', 'tree-sitter-python.wasm'] },
+      { name: 'tree-sitter.js', role: 'runtime', source: ['web-tree-sitter', 'tree-sitter.js'] },
+      { name: 'tree-sitter.wasm', role: 'runtime-wasm', source: ['web-tree-sitter', 'tree-sitter.wasm'] },
+      { name: 'tree-sitter-python.wasm', role: 'grammar', source: ['tree-sitter-wasms', 'out', 'tree-sitter-python.wasm'] },
     ],
   },
 ]

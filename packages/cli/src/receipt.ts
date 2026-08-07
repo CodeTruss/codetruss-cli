@@ -456,6 +456,67 @@ function commentSignalLines(receipt: Receipt): string[] {
   ]
 }
 
+function tableCell(value: string): string {
+  return value.replaceAll('|', '\\|')
+}
+
+function findingLocation(finding: Receipt['analyzers']['findings'][number]): string {
+  return finding.filePath ? `\`${finding.filePath}${finding.line ? `:${finding.line}` : ''}\`` : 'repository'
+}
+
+/** At most this many dismissals are tabulated; the signed JSON always holds them all. */
+const SUPPRESSION_ROW_LIMIT = 100
+/** At most this many reason-less marker locations are named inline. */
+const REJECTED_MARKER_LIMIT = 20
+
+/**
+ * What a `codetruss-ignore` comment did to this analysis.
+ *
+ * A dismissed finding is REPORTED as dismissed, never omitted. The product's
+ * whole claim is that the receipt states what was and was not flagged; a receipt
+ * that silently dropped a finding because a comment in the repository told it to
+ * would make "nothing was found" reachable by editing a comment, and the
+ * signature would then be attesting to a sentence the evidence does not support.
+ * So the finding, its location, and the exact reason its author gave all survive
+ * into the signed bytes, and the reader decides whether the reason is good.
+ *
+ * Markers that gave no reason are named too. They dismiss nothing — a reason is
+ * required precisely because the reason is the evidence — and a developer who
+ * wrote one has to be able to find out why nothing happened.
+ *
+ * Emits nothing when a repository dismissed nothing, so every receipt signed
+ * before suppression existed still renders, and verifies, byte for byte.
+ */
+function suppressionLines(receipt: Receipt): string[] {
+  const suppressed = receipt.analyzers.suppressed ?? []
+  const rejected = receipt.analyzers.rejectedSuppressions ?? []
+  if (suppressed.length === 0 && rejected.length === 0) return []
+  const rows = suppressed.slice(0, SUPPRESSION_ROW_LIMIT)
+  const namedMarkers = rejected.slice(0, REJECTED_MARKER_LIMIT)
+  return [
+    '',
+    `## Suppressed findings (${suppressed.length})`,
+    ...(suppressed.length ? [
+      '',
+      'The analyzers above produced these findings, and a `codetruss-ignore: <reason>` comment in the source dismissed them. They did not affect the verdict. This list covers the whole repository, not only the changed files.',
+      '',
+      '| Severity | Analyzer | Location | Finding | Reason given |',
+      '|---|---|---|---|---|',
+      ...rows.map((finding) => `| ${finding.severity} | ${finding.analyzerId ?? 'unknown'} | ${findingLocation(finding)} | ${tableCell(finding.title)} | ${tableCell(finding.suppression?.reason ?? '')} |`),
+      ...(suppressed.length > rows.length
+        ? ['', `${suppressed.length - rows.length} further dismissed finding(s) are recorded in the signed JSON and not tabulated here.`]
+        : []),
+    ] : [
+      '',
+      'Nothing was dismissed in this repository.',
+    ]),
+    ...(rejected.length ? [
+      '',
+      `${rejected.length} \`codetruss-ignore\` marker(s) gave no reason and therefore dismissed nothing: ${namedMarkers.map((site) => `\`${site}\``).join(', ')}${rejected.length > namedMarkers.length ? `, and ${rejected.length - namedMarkers.length} more` : ''}. A dismissal is accepted only as \`codetruss-ignore: <reason>\`, because the reason is the evidence. Those findings are still reported above.`,
+    ] : []),
+  ]
+}
+
 /** Which historical rendering of the analysis block to reproduce. */
 type ReceiptMarkdownVariant = 'current' | 'legacy-scores' | 'prior-profile'
 
@@ -494,7 +555,8 @@ function renderMarkdownInternal(receipt: Receipt, variant: ReceiptMarkdownVarian
     '',
     '| Severity | Analyzer | Location | Finding |',
     '|---|---|---|---|',
-    ...receipt.analyzers.findings.slice(0, 100).map((finding) => `| ${finding.severity} | ${finding.analyzerId ?? 'unknown'} | ${finding.filePath ? `\`${finding.filePath}${finding.line ? `:${finding.line}` : ''}\`` : 'repository'} | ${finding.title.replaceAll('|', '\\|')} |`),
+    ...receipt.analyzers.findings.slice(0, 100).map((finding) => `| ${finding.severity} | ${finding.analyzerId ?? 'unknown'} | ${findingLocation(finding)} | ${tableCell(finding.title)} |`),
+    ...suppressionLines(receipt),
     '',
     // Emits nothing when no finding carries a fix, so every receipt signed
     // before suggestions existed still renders to its original bytes.
@@ -665,6 +727,10 @@ export async function createSyncEnvelope(receipt: Receipt): Promise<SyncEnvelope
       .filter((path): path is string => Boolean(path) && !pathRelatedToChanges(path, changedPaths))),
   ]
   for (const finding of receipt.analyzers.findings) collectPotentialPaths(finding.metadata, possiblePrivatePaths)
+  for (const finding of receipt.analyzers.suppressed ?? []) {
+    if (finding.filePath && !pathRelatedToChanges(finding.filePath, changedPaths)) possiblePrivatePaths.push(finding.filePath)
+    collectPotentialPaths(finding.metadata, possiblePrivatePaths)
+  }
   for (const pass of receipt.analyzers.passes) {
     for (const finding of pass.result.findings) collectPotentialPaths(finding.metadata, possiblePrivatePaths)
   }
@@ -689,7 +755,7 @@ export async function createSyncEnvelope(receipt: Receipt): Promise<SyncEnvelope
     if (pass.result.truncated !== undefined) result.truncated = pass.result.truncated
     return { id: pass.id, result }
   })
-  synced.analyzers.findings = synced.analyzers.findings
+  const sanitizeFindings = (findings: Receipt['analyzers']['findings']): Receipt['analyzers']['findings'] => findings
     .filter((finding) => !finding.filePath || pathRelatedToChanges(finding.filePath, changedPaths))
     .map((finding) => {
       const sanitized = {
@@ -698,12 +764,30 @@ export async function createSyncEnvelope(receipt: Receipt): Promise<SyncEnvelope
         description: redactKnownPaths(finding.description, privatePaths),
       }
       if (finding.suggestion !== undefined) sanitized.suggestion = redactKnownPaths(finding.suggestion, privatePaths)
+      // A dismissal reason is free text a developer wrote; it gets the same
+      // path redaction as every other prose field on the way out.
+      if (finding.suppression) {
+        sanitized.suppression = { ...finding.suppression, reason: redactKnownPaths(finding.suppression.reason, privatePaths) }
+      }
       delete sanitized.metadata
       // A suggested fix quotes real source lines and local paths. It stays on
       // the machine that produced it — the hosted copy never needs it.
       delete sanitized.fix
       return sanitized
     })
+  synced.analyzers.findings = sanitizeFindings(synced.analyzers.findings)
+  if (synced.analyzers.suppressed) {
+    const suppressed = sanitizeFindings(synced.analyzers.suppressed)
+    if (suppressed.length) synced.analyzers.suppressed = suppressed
+    else delete synced.analyzers.suppressed
+  }
+  if (synced.analyzers.rejectedSuppressions) {
+    // `path:line`, so the path is everything before the final colon.
+    const sites = synced.analyzers.rejectedSuppressions
+      .filter((site) => pathRelatedToChanges(site.slice(0, site.lastIndexOf(':')), changedPaths))
+    if (sites.length) synced.analyzers.rejectedSuppressions = sites
+    else delete synced.analyzers.rejectedSuppressions
+  }
   synced.verifications = synced.verifications.map((item) => ({ ...item, command: '[redacted for sync]', output: '' }))
   synced.evidence = {
     patchSha256: receipt.evidence.patchSha256,
