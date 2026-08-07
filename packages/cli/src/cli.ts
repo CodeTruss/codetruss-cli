@@ -52,6 +52,7 @@ import { revokeVerifyCommands, trustVerifyCommands, verifyCommandTrustStatus } f
 import { CLI_VERSION } from './version.js'
 import { assertLocalEvidencePathsIgnored, ensureLocalEvidenceProtected } from './local-evidence.js'
 import { guidedSetup } from './setup.js'
+import { runGrammarsCommand } from './grammar-command.js'
 
 interface Parsed { command: string; positionals: string[]; values: Map<string, string[]>; booleans: Set<string>; agent: string[] }
 
@@ -77,6 +78,7 @@ const COMMAND_OPTION_SCHEMAS: Readonly<Record<string, CommandOptionSchema>> = {
   'verify-policy': { maxPositionals: 1, agent: 'forbidden' },
   sync: { booleans: ['dry-run'], maxPositionals: 1, agent: 'forbidden' },
   hooks: { maxPositionals: 2, agent: 'forbidden' },
+  grammars: { maxPositionals: 2, agent: 'forbidden' },
 }
 
 interface EvidenceTarget {
@@ -314,6 +316,7 @@ Usage:
   codetruss auth login|status|logout
   codetruss verify-policy [status|trust|trust-key|revoke]
   codetruss hooks install|status|doctor|uninstall [pre-commit|claude|codex|all]
+  codetruss grammars list|status|install|uninstall [python]
 
 Exit codes: PASS=0, REVIEW_REQUIRED=1, FAILED=2, usage/environment=3.`
 }
@@ -712,6 +715,12 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
       return 0
     }
     throw new Error('auth requires login, status, or logout')
+  }
+  // Grammar packs live in the user's data directory, not a repository, so this
+  // must resolve before the repo-root lookup below — installing a pack from
+  // outside a git checkout is a legitimate thing to do.
+  if (parsed.command === 'grammars') {
+    return runGrammarsCommand(parsed.positionals[0] ?? 'status', parsed.positionals[1])
   }
   const root = findRepoRoot()
   if (parsed.command === 'setup') {
