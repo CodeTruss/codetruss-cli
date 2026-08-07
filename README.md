@@ -2,6 +2,13 @@
 
 The deterministic first-pass verification gate for AI-written code.
 
+> **This repository is a generated mirror.** Development happens in the private
+> CodeTruss monorepo. The `packages/` tree and `pnpm-lock.yaml` here are copied
+> from it verbatim by the release train, so hand edits to those are overwritten by
+> the next release. Please open pull requests and issues against the monorepo
+> instead. This repository does own its `.github/workflows/`, its release tags, and
+> the attestations published from them, so changes to those belong here.
+
 An agent finishes a change. Something has to look at it before a human does.
 CodeTruss Boundary is that first pass: it captures an exact before/after Git
 evidence pair, checks the change against the task contract you declared, runs 15
