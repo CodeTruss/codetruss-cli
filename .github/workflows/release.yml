@@ -82,13 +82,23 @@ jobs:
           # commit subjects. `--generate-notes` on a repo whose only commit per
           # release is "Release CodeTruss CLI vX" produces a note that says
           # nothing a reader did not already know from the title.
-          {
-            awk -v ver="## $VERSION " '
-              index($0, ver) == 1 { found = 1; next }
-              found && /^## / { exit }
-              found { print }
-            ' CHANGELOG.md
+          awk -v ver="## $VERSION " '
+            index($0, ver) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > changelog-entry.md
 
+          # Guard the EXTRACTED ENTRY, not the composed file. The install section
+          # below is written unconditionally, so a check after composition can
+          # never fail, and a version missing its changelog entry would publish a
+          # release note containing nothing but install steps.
+          if [ ! -s changelog-entry.md ]; then
+            echo "No changelog entry found for $VERSION; refusing to publish an empty release note." >&2
+            exit 1
+          fi
+
+          {
+            cat changelog-entry.md
             cat <<NOTES
 
           ## Install
@@ -117,11 +127,6 @@ jobs:
           should not have to take our word for what is in it.
           NOTES
           } > release-notes.md
-
-          if [ ! -s release-notes.md ]; then
-            echo "No changelog entry found for $VERSION; refusing to publish an empty release note." >&2
-            exit 1
-          fi
 
           gh release create "$GITHUB_REF_NAME" \
             --draft \
