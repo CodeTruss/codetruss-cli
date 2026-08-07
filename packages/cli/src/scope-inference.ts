@@ -165,10 +165,15 @@ function taskPathTokens(task: string): string[] {
  *    feature name, that the turn actually changed files under.
  * 2. `working-set` — changed files cluster under one shared parent directory.
  *    The parent is the file's immediate directory, never a climb toward the
- *    repository root, and never the repository root itself. With approved allow
- *    roots present a cluster needs two files; with none configured a single
- *    file establishes its directory, because there is no approved scope for it
- *    to drift from and the receipt says the scope was inferred entirely.
+ *    repository root, and never the repository root itself. A cluster needs two
+ *    files, with one exception: a turn that inferred nothing else at all — no
+ *    approved allow root, no root the task named, and one candidate directory —
+ *    may seat that directory on a single file, because there is genuinely no
+ *    approved scope for it to drift from and the receipt says so. The exception
+ *    is capped at that one root on purpose. Granted per directory instead, it
+ *    lets every directory a turn touched vouch for itself, and scope drift
+ *    stops being detectable on exactly the unconfigured first run where the
+ *    detection is supposed to earn its keep.
  * 3. `sibling-test` — a test file whose name mirrors a source file already in
  *    scope. Only that exact file is admitted, never its directory.
  */
@@ -204,7 +209,6 @@ export function inferTurnScope(input: TurnScopeInput): InferredScopeRoot[] {
     }
   }
 
-  const cohesion = explicitPrefixes.length === 0 ? 1 : 2
   const groups = new Map<string, string[]>()
   for (const path of paths) {
     if (covered(path)) continue
@@ -212,6 +216,15 @@ export function inferTurnScope(input: TurnScopeInput): InferredScopeRoot[] {
     if (!parent) continue
     groups.set(parent, [...(groups.get(parent) ?? []), path])
   }
+  // The single-file allowance is the whole turn's fallback, not a grant each
+  // directory can claim for itself. It holds only when admitting it is the
+  // entirety of what this turn inferred: nothing approved to drift from, no
+  // root the task already named, and one candidate directory. Let a lone file
+  // establish a root while other roots exist and the turn defines its own
+  // scope — every directory it touched legitimizes itself, drift becomes
+  // unreachable, and the receipt reasons in a circle.
+  const soleFallback = explicitPrefixes.length === 0 && roots.length === 0 && groups.size === 1
+  const cohesion = soleFallback ? 1 : 2
   const ordered = [...groups].sort(([leftRoot, left], [rightRoot, right]) => (
     right.length - left.length || leftRoot.localeCompare(rightRoot)
   ))

@@ -5,6 +5,34 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.38 — 2026-08-07
+
+- **A lone changed file no longer seats its own directory as inferred scope
+  while the turn is inferring scope elsewhere.** With no allow globs configured,
+  the working-set rule let a single file establish its parent directory as a
+  root. On a turn touching several directories with one file each, every
+  directory it touched vouched for itself, so scope drift — the detection that
+  runs on an unconfigured first run — could not fire at all. The scope was being
+  read off the very change it was meant to judge. Measured on the 0.2.36
+  teardown fixture: `codetruss review --task "Add free-text search to the task
+  list endpoint"` with no `.codetruss.yml` and no `--allow` called the unrelated
+  `src/lib/billing.ts` in scope and reported no drift, while the same fixture
+  under `--allow 'src/routes/**'` named it correctly.
+- The single-file allowance stays, narrowed to what it was introduced as in
+  0.2.32: the whole turn's fallback, not a grant each directory can claim for
+  itself. It now applies only when admitting it would be the turn's **only**
+  inferred root — no approved allow root, no root the task already named, and
+  one candidate directory. A lone file beside any other inferred scope is drift
+  again. A cluster of two files still stands on its own evidence, and a
+  directory the task names by feature is still reached without it.
+- Verdicts change only for that shape: an unconfigured turn whose changed files
+  spread across several directories with too few files to cohere. Turns with
+  configured allow globs are untouched, and so is the archetypal first-run case
+  the allowance exists for — one file, or one directory, with nothing else
+  inferred. Receipts disclose `inferred` classifications exactly as before: the
+  classification, its bases, the receipt schema, and every signed Markdown
+  rendering are unchanged, so receipts already on disk verify byte for byte.
+
 ## 0.2.37 — 2026-08-07
 
 - **A process tree whose leader already exited is never force-killed on
