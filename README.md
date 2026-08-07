@@ -44,7 +44,7 @@ To pin an exact version, install the immutable archive directly:
 
 ```bash
 npm install --global --ignore-scripts --no-audit --no-fund \
-  https://codetruss.com/downloads/codetruss-cli-0.2.39.tgz
+  https://codetruss.com/downloads/codetruss-cli-0.2.40.tgz
 ```
 
 The `@codetruss/cli` package on the npm registry is published as a separate,
@@ -121,6 +121,7 @@ codetruss sync [id|latest] [--dry-run]
 codetruss auth login|status|logout
 codetruss verify-policy [status|trust|trust-key|revoke]
 codetruss hooks install|status|doctor|uninstall [pre-commit|claude|codex|all]
+codetruss grammars list|status|install|uninstall [python]
 ```
 
 `verify-policy status`, `trust`, and `revoke` govern whether the repository's
@@ -177,7 +178,7 @@ be rechecked later with `codetruss verify latest`. Every receipt states the
 detection gaps in its own body, so a `PASS` is never mistaken for a security
 clearance. Abridged from a real 0.2.36 run, so it prints the `local-registry-v2`
 profile and its thirteen-analyzer wording. A run on this release prints
-`local-registry-v3` and fifteen; 0.2.39 keeps the v2 renderer frozen so the
+`local-registry-v4` and fifteen; 0.2.40 keeps the v2 renderer frozen so the
 receipt below still verifies byte-for-byte as signed:
 
 ```markdown
@@ -231,10 +232,15 @@ run found nothing new. It is not a statement that this change is secure.
 
 Since 0.2.35 the security rule pack and its taint solver run locally and
 offline over JavaScript, TypeScript and TSX — the same engine as the hosted
-audit, not a reimplementation. The rest of the rule pack, every other language,
-and the symbol graph remain hosted-only, and the receipt names them rather than
-leaving their absence to be inferred. Local security findings are
-`REVIEW_REQUIRED` at most; they never fail a verdict on their own.
+audit, not a reimplementation. Since 0.2.40 Python joins them if you ask for it:
+`codetruss grammars install python` fetches a pinned, digest-verified grammar
+pack, and Python is then analyzed with the complete rule pack rather than the
+reduced JavaScript subset. Nothing is bundled in the tarball and nothing is
+fetched during an analysis. The rest of the rule pack for the JavaScript family,
+every language without a pack, and the symbol graph remain hosted-only, and the
+receipt names them rather than leaving their absence to be inferred. Local
+security findings are `REVIEW_REQUIRED` at most; they never fail a verdict on
+their own.
 
 Where a finding's own evidence determines a single correct change, the receipt
 also carries a **Suggested fixes** section with a diff and a required safety
@@ -316,8 +322,8 @@ clean global install.
 Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-0.2.39.tgz --repo DeliriumPulse/codetruss-cli
-shasum -a 256 -c codetruss-cli-0.2.39.tgz.sha256
+gh attestation verify codetruss-cli-0.2.40.tgz --repo DeliriumPulse/codetruss-cli
+shasum -a 256 -c codetruss-cli-0.2.40.tgz.sha256
 ```
 
 Maintainers should follow [docs/RELEASE.md](docs/RELEASE.md). Tag-driven GitHub

@@ -104,11 +104,149 @@ function analysisProfileLines(receipt: Receipt): string[] {
   }
   if (current.id === 'local-registry-v1') return omittedSastProfileLines(receipt, current.id)
   if (current.id === 'local-registry-v2') return thirteenAnalyzerProfileLines(receipt, current.id)
+  if (current.id === 'local-registry-v3') return jsOnlySastProfileLines(receipt, current.id)
 
+  const python = pythonCoverage(receipt)
   return [
     '## Analysis profile',
     '',
     `Profile: \`${current.id}\`.`,
+    '',
+    `The 15 deterministic registry analyzers ran locally on this machine, plus a local security pass: the shared SAST engine — the same rules and the same source-to-sink taint tracking as the hosted audit — over the ${python.analyzed ? 'JavaScript, TypeScript, TSX and Python' : 'JavaScript, TypeScript and TSX'} in this repository.`,
+    '',
+    '### What the local security pass checked',
+    '',
+    '- **SQL injection (CWE-89).** Untrusted input tracked from request sources through string building into query execution.',
+    '- **Mass assignment (CWE-915).** A raw request body spread into a database write, and write helpers whose payload type accepts arbitrary keys.',
+    '- **Un-awaited database writes, swallowed errors, coercion-prone `==` comparisons, and N+1 queries in loops** — the defect classes coding agents most often introduce.',
+    ...(python.analyzed ? [
+      `- **The complete rule pack over ${python.scanned} Python file(s).** The installed grammar pack is the same \`web-tree-sitter\` runtime and the same compiled grammar the hosted audit loads, so Python here was checked by the hosted machinery rather than an approximation of it — including the injection, traversal, SSRF and deserialization classes the JavaScript subset below omits.`,
+    ] : []),
+    '',
+    '### What did not run',
+    '',
+    `- **The rest of the security rule pack${python.analyzed ? ', for JavaScript, TypeScript and TSX' : ''}.** Command injection, code injection, path traversal, SSRF, open redirect, XSS and insecure deserialization were **not** checked ${python.analyzed ? 'in those languages' : 'here'}. Those rules run in a hosted scan; absence of a finding in those classes means they were not analyzed, not that the code is clean.`,
+    ...pythonDisclosureLines(python),
+    '- **Hosted symbol graph.** No cross-file call or data-flow graph was built, so architecture and dead-code conclusions cover only what the local passes can see in isolation.',
+    '- **Abstraction-shape analysis.** Single-implementation interfaces, options nobody overrides, and parameters never varied at any call site were not checked. They require the cross-file symbol graph, which does not run locally. This receipt says nothing either way about those shapes.',
+    ...(receipt.llm ? [] : [
+      '- **Optional LLM review.** No model read this diff. It is opt-in via `--llm` and is force-disabled under agent hooks, so a hook receipt is always deterministic evidence only.',
+    ]),
+    '- **Hosted Health scores.** Not calculated, reported as **N/A**. The scores are defined over the graph and the complete SAST pass; a number derived from this pass set would overstate what ran.',
+    '',
+    'Local security findings are reported for review and do not fail the verdict on their own.',
+    '',
+    'A PASS verdict means the passes listed above never ran and the passes that did run found nothing new. It is not a statement that this change is secure.',
+    '',
+    '[Run a hosted full audit](https://codetruss.com/dashboard/repos/new?source=cli-receipt).',
+  ]
+}
+
+interface PythonCoverage {
+  status: string
+  /** Python files offered to the pass. Zero means the repository has none. */
+  files: number
+  scanned: number
+  reason: string
+  /** Which kind of failure, when the status is `failed`. See `local-sast.ts`. */
+  failureKind: string
+  analyzed: boolean
+}
+
+/**
+ * What this run actually did about Python, read from the pass that did it.
+ *
+ * Derived from the signed JSON rather than from a constant, so the same receipt
+ * always renders the same bytes while different runs can honestly say different
+ * things. A receipt whose pass carries no Python metrics — the shape every
+ * pre-0.2.40 client wrote — reads as "no Python", which is what those clients
+ * meant, and the wording for that case is unchanged from v3.
+ */
+function pythonCoverage(receipt: Receipt): PythonCoverage {
+  const metrics = receipt.analyzers.passes.find((pass) => pass.id === 'local-sast')?.result.metrics
+  const status = typeof metrics?.pythonPackStatus === 'string' ? metrics.pythonPackStatus : 'not-applicable'
+  const files = Number(metrics?.pythonFiles)
+  const scanned = Number(metrics?.pythonFilesScanned)
+  const reason = typeof metrics?.pythonPackReason === 'string' ? metrics.pythonPackReason : ''
+  // A `failed` pass from a client that predates the taxonomy carries no kind.
+  // `digest` is the safe default there only because it is what those clients
+  // already rendered; nothing new is asserted about an old receipt.
+  const failureKind = typeof metrics?.pythonPackFailureKind === 'string' ? metrics.pythonPackFailureKind : 'digest'
+  return {
+    status,
+    files: Number.isFinite(files) ? files : 0,
+    scanned: Number.isFinite(scanned) ? scanned : 0,
+    reason,
+    failureKind,
+    analyzed: status === 'verified' && Number.isFinite(scanned) && scanned > 0,
+  }
+}
+
+/**
+ * The non-JavaScript-language paragraph, in the states it can be in.
+ *
+ * "Skipped" and "skipped because the bytes did not verify" are different facts
+ * and a reader has to be able to tell them apart: the first is a choice they can
+ * reverse with one command, the second means something on their machine is not
+ * what this CLI published. The three FAILURE kinds are different facts for the
+ * same reason — only one of them is about the pack at all, and a receipt that
+ * blames a user's install for their machine's out-of-memory error has published
+ * an accusation it cannot support.
+ *
+ * The closing sentence in every failure branch is deliberately the provable one.
+ * "Nothing was analyzed with unverified bytes" is true of this loader — it holds
+ * one buffer per artifact and executes that buffer — but it is an assertion
+ * about the CLI's internals that a receipt's reader has no way to check, and it
+ * makes a claim wider than this pass can speak to. "No findings from this pack
+ * were reported" says less and is verifiable against the receipt in hand.
+ */
+function pythonDisclosureLines(python: PythonCoverage): string[] {
+  const others = 'Go, Java, C#, PHP, Ruby and Rust'
+  if (python.status === 'verified' && python.analyzed) {
+    return [
+      `- **Non-JavaScript languages other than Python.** ${others} in this repository received secret scanning and the other registry passes, but no security rule or taint analysis.`,
+    ]
+  }
+  if (python.status === 'absent') {
+    return [
+      `- **Python.** ${python.files} Python file(s) here received secret scanning and the other registry passes, but no security rule or taint analysis: the optional Python grammar pack is not installed. Install it with \`codetruss grammars install python\` to analyze them locally, or run a hosted scan.`,
+      `- **Other non-JavaScript languages.** ${others} in this repository were likewise not covered by any security rule or taint analysis.`,
+    ]
+  }
+  if (python.status === 'failed') {
+    return [
+      `- **Python.** ${python.files} Python file(s) were **not** analyzed. ${pythonFailureSentence(python)} No findings from this pack were reported.`,
+      `- **Other non-JavaScript languages.** ${others} in this repository received secret scanning and the other registry passes, but no security rule or taint analysis.`,
+    ]
+  }
+  return [
+    `- **Non-JavaScript languages.** The local pass covered JavaScript, TypeScript and TSX. Python, ${others} in this repository received secret scanning and the other registry passes, but no security rule or taint analysis.`,
+  ]
+}
+
+/** The one sentence that differs between the three ways a pack run can fail. */
+function pythonFailureSentence(python: PythonCoverage): string {
+  if (python.failureKind === 'runtime') {
+    // The digests PASSED here. Saying so is the point: the user's install is
+    // fine and the problem is this machine or this Node build.
+    return `The installed Python grammar pack matched the digests compiled into this CLI, but its runtime could not start on this machine, so no Python was parsed: ${python.reason}.`
+  }
+  if (python.failureKind === 'scan') {
+    return `The installed Python grammar pack verified and loaded, but the scan failed partway through and its partial results were discarded rather than reported as a complete Python result: ${python.reason}.`
+  }
+  return `The installed Python grammar pack did not verify against what this CLI published, so it was not loaded: ${python.reason}. Reinstall it with \`codetruss grammars install python\`.`
+}
+
+/**
+ * The profile block exactly as CLI 0.2.39 wrote it, when the local pass could
+ * only ever reach the JS family. Frozen so those receipts still reproduce
+ * byte-for-byte.
+ */
+function jsOnlySastProfileLines(receipt: Receipt, profileId: string): string[] {
+  return [
+    '## Analysis profile',
+    '',
+    `Profile: \`${profileId}\`.`,
     '',
     'The 15 deterministic registry analyzers ran locally on this machine, plus a local security pass: the shared SAST engine — the same rules and the same source-to-sink taint tracking as the hosted audit — over the JavaScript, TypeScript and TSX in this repository.',
     '',

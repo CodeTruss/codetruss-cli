@@ -1,6 +1,6 @@
 {
   "name": "@codetruss/cli",
-  "version": "0.2.39",
+  "version": "0.2.40",
   "description": "Local-first scope, quality, and verification receipts for coding agents",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -42,6 +42,8 @@
     "build": "node scripts/build.mjs",
     "release:artifact": "node scripts/build-release.mjs",
     "verify:artifact": "node scripts/verify-release.mjs",
+    "release:grammars": "node scripts/build-grammar-packs.mjs",
+    "verify:grammars": "node scripts/verify-grammar-packs.mjs",
     "test:install": "node scripts/test-install.mjs",
     "prepack": "pnpm build",
     "pretest": "pnpm build",

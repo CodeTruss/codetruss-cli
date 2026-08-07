@@ -60,6 +60,40 @@ function profileV2Fixture(root: string, patch = 'diff evidence'): Receipt {
   }
 }
 
+/** A receipt as CLI 0.2.39 signed it, when the local pass reached the JS family only. */
+function profileV3Fixture(root: string, patch = 'diff evidence'): Receipt {
+  const receipt = fixture(root, patch)
+  return {
+    ...receipt,
+    analyzers: {
+      passes: receipt.analyzers.passes,
+      findings: receipt.analyzers.findings,
+      index: receipt.analyzers.index,
+      analysisProfile: {
+        id: 'local-registry-v3',
+        omittedPasses: ['graph'],
+        localPasses: ['local-sast'],
+        scoreStatus: 'not-computed',
+      },
+    },
+  }
+}
+
+/** A current receipt whose local pass recorded a Python coverage outcome. */
+function pythonFixture(
+  metrics: Record<string, string | number>,
+  root = '/tmp/repo',
+): Receipt {
+  const receipt = fixture(root)
+  return {
+    ...receipt,
+    analyzers: {
+      ...receipt.analyzers,
+      passes: [{ id: 'local-sast', result: { findings: [], complete: true, truncated: false, metrics } }],
+    },
+  }
+}
+
 function legacyFixture(root: string, patch = 'diff evidence'): Receipt {
   const receipt = fixture(root, patch)
   return {
@@ -91,7 +125,7 @@ describe('signed receipts', () => {
     await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
     const markdown = await readFile(paths.markdown, 'utf8')
     expect(markdown).toContain('Policy SHA-256')
-    expect(markdown).toContain('Profile: `local-registry-v3`')
+    expect(markdown).toContain('Profile: `local-registry-v4`')
     expect(markdown).not.toContain('Final scores:')
     await writeFile(paths.markdown, `${await readFile(paths.markdown, 'utf8')}tampered`)
     await expect(verifyReceipt(dir, receipt.sessionId)).rejects.toThrow('Markdown receipt does not match')
@@ -175,12 +209,139 @@ describe('signed receipts', () => {
     await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
   })
 
+  it('reproduces the v3 wording for a receipt signed before the grammar pack existed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-profile-v3-receipt-'))
+    const dir = join(root, 'receipts')
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const receipt = profileV3Fixture(root)
+    const paths = await writeReceipt(dir, receipt, 'diff evidence')
+
+    const markdown = await readFile(paths.markdown, 'utf8')
+    expect(markdown).toContain('Profile: `local-registry-v3`')
+    // v3 could only ever mean this, so it must keep saying exactly this.
+    expect(markdown).toContain('The local pass covers JavaScript, TypeScript and TSX only.')
+    expect(markdown).not.toContain('grammar pack')
+    await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
+  })
+
   it('states the new registry count and the abstraction-shape limit on a current receipt', () => {
     const markdown = renderMarkdown(fixture('/tmp/repo'))
-    expect(markdown).toContain('Profile: `local-registry-v3`')
+    expect(markdown).toContain('Profile: `local-registry-v4`')
     expect(markdown).toContain('The 15 deterministic registry analyzers ran locally on this machine')
     expect(markdown).toContain('**Abstraction-shape analysis.**')
     expect(markdown).toContain('says nothing either way about those shapes')
+  })
+
+  describe('the Python disclosure states what this run actually did', () => {
+    it('names the pack and the command when it is simply not installed', () => {
+      const markdown = renderMarkdown(pythonFixture({
+        pythonFiles: 12,
+        pythonFilesScanned: 0,
+        pythonPackStatus: 'absent',
+        pythonPackReason: 'the Python grammar pack is not installed',
+      }))
+      expect(markdown).toContain('12 Python file(s) here received secret scanning')
+      expect(markdown).toContain('codetruss grammars install python')
+      // Absence is a gap, never a clean result.
+      expect(markdown).toContain('no security rule or taint analysis')
+      expect(markdown).not.toContain('JavaScript, TypeScript, TSX and Python')
+    })
+
+    it('claims Python coverage only when the pack actually scanned files', () => {
+      const markdown = renderMarkdown(pythonFixture({
+        pythonFiles: 47,
+        pythonFilesScanned: 47,
+        pythonPackStatus: 'verified',
+      }))
+      expect(markdown).toContain('JavaScript, TypeScript, TSX and Python')
+      expect(markdown).toContain('The complete rule pack over 47 Python file(s)')
+      expect(markdown).toContain('**Non-JavaScript languages other than Python.**')
+      // The JS subset limit survives: Python coverage must not be read as
+      // covering the injection classes the JS pass still skips.
+      expect(markdown).toContain('for JavaScript, TypeScript and TSX')
+      expect(markdown).not.toContain('grammars install python')
+    })
+
+    it('distinguishes a tampered pack from an absent one, and never loads it', () => {
+      const markdown = renderMarkdown(pythonFixture({
+        pythonFiles: 5,
+        pythonFilesScanned: 0,
+        pythonPackStatus: 'failed',
+        pythonPackFailureKind: 'digest',
+        pythonPackReason: 'tree-sitter-python.wasm has digest deadbeef, expected 9056d0fb',
+      }))
+      expect(markdown).toContain('did not verify against what this CLI published')
+      expect(markdown).toContain('tree-sitter-python.wasm has digest deadbeef')
+      expect(markdown).toContain('Reinstall it with `codetruss grammars install python`')
+      // Provable, and checkable against the finding list in this same receipt.
+      expect(markdown).toContain('No findings from this pack were reported.')
+      expect(markdown).not.toContain('JavaScript, TypeScript, TSX and Python')
+    })
+
+    /**
+     * The three failure kinds are three unrelated events, and only one of them
+     * is about the pack's bytes. A receipt that renders the digest sentence for
+     * an out-of-memory error has published a false accusation of tampering — in
+     * a signed document, over the product's own core claim.
+     */
+    it('blames the machine, not the install, when the pack verified and the runtime would not start', () => {
+      const markdown = renderMarkdown(pythonFixture({
+        pythonFiles: 5,
+        pythonFilesScanned: 0,
+        pythonPackStatus: 'failed',
+        pythonPackFailureKind: 'runtime',
+        pythonPackReason: 'grammar runtime failed to load: Aborted(OOM)',
+      }))
+      expect(markdown).toContain('matched the digests compiled into this CLI, but its runtime could not start on this machine')
+      expect(markdown).toContain('Aborted(OOM)')
+      expect(markdown).not.toContain('did not verify')
+      // Nothing is wrong with the install, so nothing suggests reinstalling it.
+      expect(markdown).not.toContain('Reinstall it with')
+      expect(markdown).toContain('No findings from this pack were reported.')
+    })
+
+    it('says the scan failed partway when the pack loaded and the scan threw', () => {
+      const markdown = renderMarkdown(pythonFixture({
+        pythonFiles: 5,
+        pythonFilesScanned: 0,
+        pythonPackStatus: 'failed',
+        pythonPackFailureKind: 'scan',
+        pythonPackReason: 'grammar pack scan failed: out of memory',
+      }))
+      expect(markdown).toContain('verified and loaded, but the scan failed partway through')
+      expect(markdown).toContain('partial results were discarded')
+      expect(markdown).not.toContain('did not verify')
+      expect(markdown).toContain('No findings from this pack were reported.')
+    })
+
+    it('renders a failed pass from a client that predates the taxonomy as before', () => {
+      const markdown = renderMarkdown(pythonFixture({
+        pythonFiles: 5,
+        pythonFilesScanned: 0,
+        pythonPackStatus: 'failed',
+        pythonPackReason: 'tree-sitter.js is missing from the installed pack',
+      }))
+      // No kind recorded means no new claim may be invented for it.
+      expect(markdown).toContain('did not verify against what this CLI published')
+      expect(markdown).not.toContain('runtime could not start')
+    })
+
+    it('says nothing about a pack for a repository with no Python in it', () => {
+      const markdown = renderMarkdown(pythonFixture({
+        pythonFiles: 0,
+        pythonFilesScanned: 0,
+        pythonPackStatus: 'not-applicable',
+      }))
+      expect(markdown).toContain('The local pass covered JavaScript, TypeScript and TSX.')
+      expect(markdown).not.toContain('grammar pack')
+      expect(markdown).not.toContain('grammars install')
+    })
+
+    it('reads a pre-0.2.40 pass with no Python metrics as the JS-only case', () => {
+      const markdown = renderMarkdown(pythonFixture({ inputFiles: 3, filesScanned: 3 }))
+      expect(markdown).toContain('The local pass covered JavaScript, TypeScript and TSX.')
+      expect(markdown).not.toContain('grammar pack')
+    })
   })
 
   it('renders the comment-signal measurement from pass metrics, and nothing without them', () => {

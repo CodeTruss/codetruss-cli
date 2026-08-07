@@ -5,6 +5,90 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.40 — 2026-08-07
+
+- **Python can now be analyzed locally, if you ask for it.** `codetruss
+  grammars install python` downloads the `web-tree-sitter` runtime and the
+  compiled Python grammar (722 KB) into your data directory — XDG on macOS and
+  Linux, `LOCALAPPDATA` on Windows. Nothing is bundled in the tarball, nothing
+  is fetched during an analysis, and no other command installs it for you. The
+  CLI ships a hand-written JavaScript parser precisely because these grammars
+  are several times its entire release budget, and that trade is unchanged for
+  anyone who does not run this command. `codetruss grammars list|status|
+  uninstall` round out the group; `status` exits non-zero when a pack is
+  missing or fails verification, so it can gate a setup script.
+- **The pack is pinned, verified as it arrives, and verified again every time
+  it is loaded.** Each artifact's SHA-256 is compiled into the CLI at build
+  time. The download is hashed as it streams, with the pinned length enforced
+  mid-stream so a wrong or hostile origin cannot write an unbounded file to
+  disk; artifacts land in a scratch directory and are moved into place only
+  after every one of them verifies, so a pack directory is never half-installed.
+  The only download origin is `codetruss.com` — no third-party CDN, and
+  redirects are refused. Hashing is streamed in-process, never shelled out to
+  `shasum` or `Get-FileHash`. **Every** failure — absent, truncated, over-long,
+  wrong digest, unreadable, or an unexpected extra file in the pack directory —
+  resolves to "pack unavailable", and the run reports Python as skipped. There
+  is no path on which unverified bytes are executed.
+- **Python runs the complete rule pack, not the reduced JavaScript subset.**
+  That subset exists because a hand-written parser might disagree with
+  tree-sitter, and only rules proven to agree were admitted. A grammar pack *is*
+  the hosted parser and the hosted grammar, so there is no divergence to guard
+  against — and narrowing it would report less than the same code receives in a
+  hosted scan, for no gain in precision. Command injection, path traversal,
+  SSRF and insecure deserialization are checked in Python locally; they remain
+  unchecked in JavaScript, TypeScript and TSX, and the receipt keeps saying so.
+- **Verified against the hosted path over 233 real Python files** — the
+  full-stack FastAPI template, three further repositories, and a synthetic
+  fixture covering each rule class. Both parsers produced the same 11 findings,
+  with **zero divergence in either direction**.
+- **Receipts move to the `local-registry-v4` profile, which states what the run
+  actually did about Python.** The pass set is unchanged from v3; the wording
+  had to change, because v3 says flatly that the local pass covers "JavaScript,
+  TypeScript and TSX only" and that Python received no security analysis, and
+  that is false whenever a pack is installed. There are now three
+  distinguishable statements instead of one frozen sentence: **absent** names
+  the Python file count and the command that would cover them, **verified**
+  names the rule pack and the file count while keeping the JavaScript subset's
+  limits scoped to JavaScript, and a **failed** pack now says *which* kind of
+  failure it was — a digest mismatch (the pack does not match what this CLI
+  published, so reinstall), a runtime that would not start on this machine even
+  though the digests matched, or a scan that threw partway and had its partial
+  results discarded. Only a real digest mismatch renders the tampering sentence;
+  an out-of-memory error no longer accuses your install of not matching the
+  published digests. Every failure branch closes with the provable "No findings
+  from this pack were reported" in place of the wider absolute claim.
+  `local-registry-v3` keeps a frozen renderer, so receipts signed by 0.2.39
+  still verify byte-for-byte.
+- **The bytes that are verified are now the exact bytes that execute.** The
+  loader used to hash each artifact by path and then re-open the same path to
+  `require()` it, so the file that was hashed and the file that ran were two
+  separate reads with a window between them — three digests and a directory
+  listing wide enough for another process with write access to the pack
+  directory to swap a hostile `tree-sitter.js` in after the check and have it
+  executed. `inspectGrammarPack` now reads each artifact once and returns the
+  buffer it hashed; the runtime is compiled from that buffer and the two WASM
+  artifacts are handed to `web-tree-sitter` as in-memory `Uint8Array`s
+  (`wasmBinary` and `Language.load`), so nothing is ever resolved from a path a
+  second time. Artifacts are opened `O_NOFOLLOW` and rejected unless they are
+  regular files; a symlinked pack root, a pack root not owned by the current
+  user, or one writable by group or other is refused, and a loose root created
+  by an earlier CLI is tightened to `0700` on install. A local same-user race
+  that reliably executed attacker code against the previous loader now fails
+  every attempt.
+- **Fixed: Python was silently dropped from the second half of every review.**
+  The tree-sitter runtime reassigns its own entry in Node's module cache while
+  initializing, so loading it a second time in one process returned the wrong
+  object. A review analyzes twice — once for the baseline tree, once for the
+  final tree — which meant the final analysis quietly failed to load the grammar
+  and reported Python as unanalyzable even with a healthy pack installed. The
+  runtime is now loaded once per process. Digests are still re-checked on every
+  load; only the runtime construction is reused.
+- **Fixed: the Windows data directory was resolved with POSIX path rules.**
+  `LOCALAPPDATA` was checked with a path test that treats `C:\Users\…` as
+  relative anywhere other than Windows, which made the branch correct on Windows
+  and unverifiable everywhere else. It now names the Windows path flavour
+  explicitly, and is covered by a test that runs on every platform.
+
 ## 0.2.39 — 2026-08-07
 
 - **Two analyzers join the registry, which now holds 15.** Both come from a

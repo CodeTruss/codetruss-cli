@@ -33,10 +33,16 @@ export const MAX_LLM_DIFF_BYTES = 2_000_000
  * Honest local-analysis contract: which passes ran on this machine, which did
  * not, and whether scores may be inferred.
  *
- * `local-registry-v3` supersedes `local-registry-v2`, which ran thirteen
- * registry analyzers; the registry now holds fifteen, and the profile block
- * states that count. `local-registry-v2` had itself superseded `v1`, in which
- * SAST was omitted entirely.
+ * `local-registry-v4` supersedes `local-registry-v3`. The pass SET is identical
+ * — fifteen registry analyzers, the local security pass, no graph — but v3's
+ * block states flatly that the local pass "covers JavaScript, TypeScript and
+ * TSX only" and that Python "received no security rule or taint analysis". With
+ * an installed grammar pack that sentence is false, so the wording had to change
+ * and therefore the id had to change with it. v4 renders its Python paragraph
+ * from what the run recorded rather than from a constant.
+ *
+ * `local-registry-v3` had superseded `v2`, which ran thirteen registry
+ * analyzers; `v2` had superseded `v1`, in which SAST was omitted entirely.
  *
  * The id is bumped rather than the wording quietly changed, and it is bumped
  * for a count as readily as for a pass: this shape sits inside signed receipts,
@@ -45,7 +51,7 @@ export const MAX_LLM_DIFF_BYTES = 2_000_000
  * with. Every superseded version keeps a frozen renderer in `receipt.ts`.
  */
 export const LOCAL_ANALYSIS_PROFILE = {
-  id: 'local-registry-v3',
+  id: 'local-registry-v4',
   omittedPasses: ['graph'],
   localPasses: ['local-sast'],
   scoreStatus: 'not-computed',
@@ -65,10 +71,18 @@ export interface LegacyLocalAnalysisProfileV2 {
   localPasses: readonly ['local-sast']
   scoreStatus: 'not-computed'
 }
+/** The v3 shape, retained so JS-only-local-SAST receipts still parse. */
+export interface LegacyLocalAnalysisProfileV3 {
+  id: 'local-registry-v3'
+  omittedPasses: readonly ['graph']
+  localPasses: readonly ['local-sast']
+  scoreStatus: 'not-computed'
+}
 export type AnyLocalAnalysisProfile =
   | LocalAnalysisProfile
   | LegacyLocalAnalysisProfileV1
   | LegacyLocalAnalysisProfileV2
+  | LegacyLocalAnalysisProfileV3
 
 export interface CliConfig {
   version: 1

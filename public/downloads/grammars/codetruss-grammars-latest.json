@@ -1,0 +1,37 @@
+{
+  "packs": [
+    {
+      "name": "python",
+      "version": "1.0.0",
+      "language": "python",
+      "runtime": {
+        "package": "web-tree-sitter",
+        "version": "0.22.6"
+      },
+      "grammar": {
+        "package": "tree-sitter-wasms",
+        "version": "0.1.11"
+      },
+      "files": [
+        {
+          "name": "tree-sitter.js",
+          "url": "/downloads/grammars/python-1.0.0/tree-sitter.js",
+          "bytes": 74197,
+          "sha256": "ddcacb69cd26c07322c51b798a63805fd99c272177c9633a978f3886358ca070"
+        },
+        {
+          "name": "tree-sitter.wasm",
+          "url": "/downloads/grammars/python-1.0.0/tree-sitter.wasm",
+          "bytes": 188635,
+          "sha256": "29208e71028ab0c11dfcc941255075aad75545394467aa22d817a6356714090f"
+        },
+        {
+          "name": "tree-sitter-python.wasm",
+          "url": "/downloads/grammars/python-1.0.0/tree-sitter-python.wasm",
+          "bytes": 476105,
+          "sha256": "9056d0fb0c337810d019fae350e8167786119da98f0f282aceae7ab89ee8253b"
+        }
+      ]
+    }
+  ]
+}
