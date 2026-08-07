@@ -55,13 +55,23 @@ export async function loadSigningKey(create = false): Promise<SigningKey> {
   return { privateKey, publicKey, fingerprint: publicKeyFingerprint(publicKey) }
 }
 
-export async function requireTrustedSigningKey(pinnedPublicKey?: string): Promise<SigningKey> {
+/**
+ * The repository pin is a SET of trusted signers, so each developer signs with
+ * their own key and keeps per-signer attribution. The failure message must
+ * never suggest obtaining someone else's private key — that would destroy the
+ * attribution the receipt exists to provide.
+ */
+export async function requireTrustedSigningKey(pinnedPublicKey?: string | string[]): Promise<SigningKey> {
   const key = await loadSigningKey(true)
-  if (pinnedPublicKey) {
-    const pinnedFingerprint = publicKeyFingerprint(pinnedPublicKey)
-    if (pinnedFingerprint !== key.fingerprint) {
+  const pins = (Array.isArray(pinnedPublicKey) ? pinnedPublicKey : [pinnedPublicKey]).filter(
+    (pin): pin is string => typeof pin === 'string' && pin.trim().length > 0,
+  )
+  if (pins.length > 0) {
+    const fingerprints = pins.map((pin) => publicKeyFingerprint(pin))
+    if (!fingerprints.includes(key.fingerprint)) {
       throw new Error(
-        `local signing key ${key.fingerprint} does not match repository pin ${pinnedFingerprint}; set CODETRUSS_SIGNING_KEY to the trusted private key`,
+        `this repository trusts ${fingerprints.join(', ')} but your local signing key is ${key.fingerprint}; `
+        + 'add yours with codetruss verify-policy trust-key (or have a maintainer append it to signing.publicKeys)',
       )
     }
   }

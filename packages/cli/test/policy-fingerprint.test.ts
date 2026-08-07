@@ -9,7 +9,7 @@ const config: CliConfig = {
   verify: [],
   receipts: { dir: '.codetruss/receipts' },
   llm: { provider: 'claude', model: 'default', maxDiffBytes: 100_000 },
-  signing: {},
+  signing: { publicKeys: [] },
   sync: { url: 'https://codetruss.com' },
 }
 

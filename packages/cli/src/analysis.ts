@@ -8,7 +8,10 @@ export async function analyzeRepository(root: string) {
   const priorOffline = process.env.CODETRUSS_OFFLINE
   process.env.CODETRUSS_OFFLINE = '1'
   try {
-    const result = await runAnalyzers(index)
+    // LOCAL_ANALYSIS_PROFILE omits the SAST pass. Declaring it here is what
+    // makes the coverage analyzer disclose the gap instead of inheriting the
+    // hosted premise that TypeScript/JavaScript/Python were security-reviewed.
+    const result = await runAnalyzers(index, { sast: false })
     return { ...result, index }
   } finally {
     if (priorOffline === undefined) delete process.env.CODETRUSS_OFFLINE
@@ -80,7 +83,53 @@ export function diffFindings(
   return { introduced, worsened, recurring, resolved }
 }
 
-/** Offline vulnerability lookup is advisory; every deterministic pass and index byte is required. */
+/**
+ * A partially-read index still counts as authoritative when it measurably
+ * covered at least this fraction of its analyzable input. Mirrors
+ * AUTHORITATIVE_COVERAGE_RATIO in the hosted pipeline (src/lib/scans/analysis.ts):
+ * an immaterial cap (one oversized lockfile) must not void the receipt, while a
+ * real coverage loss still withholds one.
+ */
+export const AUTHORITATIVE_COVERAGE_RATIO = 0.95
+
+/**
+ * Text files loaded over analyzable text candidates. Binary files masquerading
+ * as text are not analyzable and never count against coverage. The file-walk
+ * cap has no measurable denominator — unwalked files are unknown — so a
+ * truncated walk claims no ratio.
+ */
+export function indexCoverageRatio(coverage: IndexCoverage | undefined): number | undefined {
+  if (!coverage || coverage.truncated) return undefined
+  const analyzable = coverage.textCandidates - coverage.binaryTextFiles
+  if (analyzable <= 0) return 1
+  return coverage.contentLoaded / analyzable
+}
+
+function coverageIsAuthoritative(coverage: IndexCoverage | undefined): boolean {
+  const ratio = indexCoverageRatio(coverage)
+  return ratio !== undefined && ratio >= AUTHORITATIVE_COVERAGE_RATIO
+}
+
+/** Content-loading limitations, worded so the reader learns the fix, not just the symptom. */
+function coverageLimitations(coverage: IndexCoverage): string[] {
+  const limitations: string[] = []
+  if (coverage.oversizedTextFiles > 0) {
+    limitations.push(
+      `${coverage.oversizedTextFiles} oversized analyzable file(s) were not read — raise CODETRUSS_MAX_INDEX_FILE_BYTES to include them`,
+    )
+  }
+  if (coverage.unreadableTextFiles > 0) limitations.push(`${coverage.unreadableTextFiles} analyzable file(s) could not be read`)
+  if (coverage.binaryTextFiles > 0) limitations.push(`${coverage.binaryTextFiles} apparent text file(s) contained binary data`)
+  return limitations
+}
+
+/**
+ * Offline vulnerability lookup is advisory; every deterministic pass is
+ * required. Index limitations are required too, EXCEPT when the index still
+ * measurably covered >= AUTHORITATIVE_COVERAGE_RATIO of its analyzable input —
+ * those are returned by analysisCoverageNotes() as review-level instead, so a
+ * single large lockfile cannot fail an otherwise clean receipt.
+ */
 export function analysisEvidenceIssues(
   passes: AnalyzerPass[],
   coverage: IndexCoverage | undefined,
@@ -96,11 +145,19 @@ export function analysisEvidenceIssues(
   if (!coverage) issues.push('repository index did not report coverage')
   else {
     if (coverage.truncated) issues.push(`repository index reached its ${coverage.maxFiles}-file bound`)
-    if (coverage.oversizedTextFiles > 0) issues.push(`${coverage.oversizedTextFiles} oversized analyzable file(s) were not read`)
-    if (coverage.unreadableTextFiles > 0) issues.push(`${coverage.unreadableTextFiles} analyzable file(s) could not be read`)
-    if (coverage.binaryTextFiles > 0) issues.push(`${coverage.binaryTextFiles} apparent text file(s) contained binary data`)
+    if (!coverageIsAuthoritative(coverage)) issues.push(...coverageLimitations(coverage))
   }
   return issues
+}
+
+/**
+ * Index limitations small enough to leave the evidence authoritative. Surfaced
+ * on the receipt as review-level context rather than suppressed — the reader
+ * still learns exactly what was not read.
+ */
+export function analysisCoverageNotes(coverage: IndexCoverage | undefined): string[] {
+  if (!coverage || !coverageIsAuthoritative(coverage)) return []
+  return coverageLimitations(coverage)
 }
 
 export function changedFindings(findings: AnalyzerFinding[], files: ChangedFile[]): AnalyzerFinding[] {
@@ -120,6 +177,7 @@ export function computeVerdict(input: {
   llm?: LlmReview
   evidenceIssues?: string[]
   baselineEvidenceIssues?: string[]
+  advisoryEvidenceIssues?: string[]
 }): { verdict: Verdict; reasons: string[] } {
   const failed: string[] = []
   const review: string[] = []
@@ -127,6 +185,7 @@ export function computeVerdict(input: {
   if (input.agentExitCode !== undefined && input.agentExitCode !== 0) failed.push(`agent command exited with code ${input.agentExitCode}`)
   for (const issue of input.evidenceIssues ?? []) failed.push(`evidence incomplete: ${issue}`)
   for (const issue of input.baselineEvidenceIssues ?? []) review.push(`baseline evidence limitation resolved in the final tree: ${issue}`)
+  for (const issue of input.advisoryEvidenceIssues ?? []) review.push(`index coverage was partial but authoritative: ${issue}`)
   for (const verification of input.verifications.filter((item) => item.exitCode !== 0)) failed.push(`verification command failed: ${verification.command}`)
   const blocking = input.findings.filter((finding) => severityRank[finding.severity] >= severityRank.HIGH && (finding.category === 'SECURITY_HYGIENE' || finding.category === 'DEPENDENCY'))
   if (blocking.length) failed.push(`${blocking.length} high/critical security or dependency finding(s) affect changed files`)

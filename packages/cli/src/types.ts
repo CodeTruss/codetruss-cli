@@ -32,7 +32,13 @@ export interface CliConfig {
     model?: string
     maxDiffBytes: number
   }
-  signing: { publicKey?: string }
+  /**
+   * Pinned signer identities. A repository is worked on by more than one
+   * developer, so the pin is a SET: `publicKeys` lists every trusted signer and
+   * `publicKey` is its first entry, kept for the single-signer config shape and
+   * for the hook turn context.
+   */
+  signing: { publicKey?: string; publicKeys: string[] }
   sync: { url: string }
 }
 

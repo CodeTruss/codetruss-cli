@@ -1,7 +1,9 @@
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { generateKeyPairSync } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
+import { loadSigningKey, requireTrustedSigningKey } from '../src/signing.js'
 import {
   APPROVED_RECEIPT_DIR,
   PRODUCTION_SYNC_ORIGIN,
@@ -118,5 +120,55 @@ describe('initialization', () => {
       config.receipts.dir = APPROVED_RECEIPT_DIR
       expect(() => receiptDir(symlinkRoot, config)).toThrow('must not traverse symbolic links')
     }
+  })
+})
+
+/**
+ * A committed .codetruss.yml pins the signing key. With a single-key pin, every
+ * teammate who clones gets exit 3 and no receipt, and the old error told them to
+ * "set CODETRUSS_SIGNING_KEY to the trusted private key" — i.e. to obtain a
+ * colleague's private key, which destroys the per-signer attribution the receipt
+ * exists to provide. Bad advice from a security product.
+ */
+describe('multi-developer signing pins', () => {
+  it('accepts a publicKeys list and keeps publicKey as the first entry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-multikey-'))
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const a = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    const b = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    await writeFile(
+      join(root, '.codetruss.yml'),
+      `allow: ["src/**"]\nsigning:\n  publicKeys:\n    - |\n${a.trimEnd().split('\n').map((l) => `      ${l}`).join('\n')}\n    - |\n${b.trimEnd().split('\n').map((l) => `      ${l}`).join('\n')}\n`,
+      'utf8',
+    )
+    const config = await loadConfig(root)
+    expect(config.signing.publicKeys).toHaveLength(2)
+    expect(config.signing.publicKey).toBe(config.signing.publicKeys[0])
+  })
+
+  it('still accepts a single legacy publicKey', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-singlekey-'))
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    await initialize(root)
+    const config = await loadConfig(root)
+    expect(config.signing.publicKeys).toHaveLength(1)
+    expect(config.signing.publicKeys[0]).toContain('BEGIN PUBLIC KEY')
+    expect(config.signing.publicKey).toBe(config.signing.publicKeys[0])
+  })
+
+  it('trusts any pinned key and never tells the reader to obtain a private key', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-trust-'))
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const mine = await loadSigningKey(true)
+    const teammate = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+
+    // My key is in the pinned set alongside a teammate's: allowed.
+    await expect(requireTrustedSigningKey([teammate, mine.publicKey])).resolves.toMatchObject({
+      fingerprint: mine.fingerprint,
+    })
+
+    // My key is absent: rejected, but the guidance must not be "get their key".
+    await expect(requireTrustedSigningKey([teammate])).rejects.toThrow(/verify-policy trust-key/)
+    await expect(requireTrustedSigningKey([teammate])).rejects.not.toThrow(/private key/)
   })
 })

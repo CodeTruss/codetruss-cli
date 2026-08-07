@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { classifyPath, isDependencyFile, sensitiveCategory } from '../src/policy.js'
-import { analysisEvidenceIssues, computeVerdict, diffFindings } from '../src/analysis.js'
-import type { AnalyzerFinding, AnalyzerPass } from '@codetruss/analyzer-engine'
+import { analysisCoverageNotes, analysisEvidenceIssues, computeVerdict, diffFindings } from '../src/analysis.js'
+import type { AnalyzerFinding, AnalyzerPass, IndexCoverage } from '@codetruss/analyzer-engine'
 
 describe('scope and sensitive policy', () => {
   it('is fail closed, gives deny precedence, and protects rename origins', () => {
@@ -111,5 +111,60 @@ describe('analyzer finding deltas', () => {
     expect(diffFindings([before], [after], [renamed])).toMatchObject({
       introduced: [], worsened: [], recurring: [after], resolved: [],
     })
+  })
+})
+
+/**
+ * A >1MB lockfile is ordinary in real repos. Failing a developer's FIRST
+ * receipt over one file the agent never touched — with a reason naming no file
+ * and no fix — reads as "this tool is broken". The hosted pipeline already
+ * solved this (AUTHORITATIVE_COVERAGE_RATIO in src/lib/scans/analysis.ts); the
+ * CLI applied zero tolerance to the identical IndexCoverage signal.
+ */
+describe('immaterial index coverage loss', () => {
+  const coverage = (over: Partial<IndexCoverage>): IndexCoverage => ({
+    discoveredFiles: 100,
+    maxFiles: 5000,
+    truncated: false,
+    textCandidates: 100,
+    contentLoaded: 100,
+    oversizedTextFiles: 0,
+    unreadableTextFiles: 0,
+    binaryTextFiles: 0,
+    ...over,
+  })
+  const passes = [{ id: 'secrets', result: { findings: [], complete: true } }] satisfies AnalyzerPass[]
+  const inScope = { path: 'src/a.ts', change: 'modified', classification: 'allowed', dependency: false, additions: 1, deletions: 0 } as const
+
+  it('does not block on one oversized file in an otherwise fully read repo', () => {
+    const c = coverage({ contentLoaded: 99, oversizedTextFiles: 1 })
+    expect(analysisEvidenceIssues(passes, c)).toEqual([])
+    const notes = analysisCoverageNotes(c)
+    expect(notes).toHaveLength(1)
+    // The reason must name the escape hatch, not just the symptom.
+    expect(notes[0]).toContain('CODETRUSS_MAX_INDEX_FILE_BYTES')
+  })
+
+  it('still blocks when a real share of the repo went unread', () => {
+    const c = coverage({ contentLoaded: 50, oversizedTextFiles: 50 })
+    expect(analysisEvidenceIssues(passes, c).length).toBeGreaterThan(0)
+    expect(analysisCoverageNotes(c)).toEqual([])
+  })
+
+  it('still blocks when the file walk hit its bound (no measurable denominator)', () => {
+    const c = coverage({ truncated: true })
+    expect(analysisEvidenceIssues(passes, c).length).toBeGreaterThan(0)
+  })
+
+  it('routes an immaterial coverage note to REVIEW_REQUIRED, not FAILED', () => {
+    const result = computeVerdict({
+      agentExitCode: 0,
+      verifications: [],
+      files: [inScope],
+      startDirty: false,
+      findings: [],
+      advisoryEvidenceIssues: analysisCoverageNotes(coverage({ contentLoaded: 99, oversizedTextFiles: 1 })),
+    })
+    expect(result.verdict).toBe('REVIEW_REQUIRED')
   })
 })

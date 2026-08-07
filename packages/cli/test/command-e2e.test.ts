@@ -83,6 +83,38 @@ describe('CLI snapshot and delta enforcement', () => {
     expect(config).toMatch(/allow:\n\s+- src\/\*\*\n\s+- tests\/\*\*/)
   }, 30_000)
 
+  it('adopts detected source roots for unattended setup instead of demanding a flag', async () => {
+    // Plug and play: a developer who runs `codetruss setup --yes` on an ordinary
+    // repo should end up protected, not stopped to look up glob syntax. The
+    // chosen scope is printed so an unattended decision stays auditable.
+    const root = await repository()
+    await mkdir(join(root, 'src'))
+    await mkdir(join(root, 'tests'))
+    await installPersistentCliFixture(root)
+    await writeFile(join(root, '.gitignore'), '/node_modules\n')
+
+    const setup = runCli(root, ['setup', '--yes'], {})
+
+    expect(setup.status, `${setup.stderr}\n${setup.stdout}`).toBe(0)
+    expect(setup.stdout).toContain('src/**')
+    const config = await readFile(join(root, '.codetruss.yml'), 'utf8')
+    expect(config).toMatch(/allow:\n\s+- src\/\*\*\n\s+- tests\/\*\*/)
+    // Command trust is the genuinely dangerous decision and must NOT be implied.
+    expect(config).not.toMatch(/^verify:\n\s+-/m)
+  }, 30_000)
+
+  it('still refuses unattended setup when no conventional source root exists', async () => {
+    // With nothing to detect, guessing would be worse than asking.
+    const root = await repository()
+    await installPersistentCliFixture(root)
+    await writeFile(join(root, '.gitignore'), '/node_modules\n')
+
+    const setup = runCli(root, ['setup', '--yes'], {})
+
+    expect(setup.status).toBe(3)
+    expect(`${setup.stderr}${setup.stdout}`).toContain('--allow')
+  }, 30_000)
+
   it('completes idempotent local-only setup and keeps generated evidence out of normal staging', async () => {
     const root = await repository()
     await mkdir(join(root, 'src'))

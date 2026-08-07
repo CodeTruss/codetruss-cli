@@ -23,14 +23,34 @@ const SECRET_PATTERNS: Array<{ name: string; re: RegExp }> = [
 
 const SKIP_FILES = /(\.env\.example|\.md|\.lock|package-lock\.json|pnpm-lock\.yaml)$/i
 const PLACEHOLDER = /(example|placeholder|your[-_]|xxx|changeme|dummy|<[^>]+>|\$\{)/i
-/** Placeholder shapes inside the matched value itself. */
-const PLACEHOLDER_VALUE = /(example|sample|dummy|fake|placeholder|changeme|your[-_]?(key|token|secret)|abc123|xxx+)/i
+/**
+ * Runtime credential REFERENCES — `process.env.X`, `{{...}}`, `${VAR}`, `ENV[]`.
+ * This is how a credential is *supposed* to be written, so it is skipped in
+ * silence; annotating correct code would be noise.
+ */
+const RUNTIME_CREDENTIAL_REFERENCE = /(\{\{|\$\{|process\.env|os\.environ|os\.getenv|\bgetenv\b|ENV\[)/i
+
+/**
+ * Literals that announce themselves as fake. Skipping these silently is
+ * correct, but a silent skip looks exactly like a scanner that detects nothing
+ * — which is what a developer concludes when they test it with a dummy key.
+ * Reported at INFO so the skip is visible and explained.
+ */
+const FAKE_LITERAL_VALUE =
+  /(example|sample|dummy|fake|placeholder|changeme|your[-_]?(key|token|secret)|abc123|xxx+)/i
+
+/** SCREAMING_SNAKE values are constant identifiers, not credentials —
+ *  `UPDATE_PASSWORD = 'UPDATE_PASSWORD'` is an enum member. */
+const CONSTANT_IDENTIFIER_VALUE = /^[A-Z0-9]+(_[A-Z0-9]+)+$/
 
 /** Dev/CI dummy hosts — credentials pointing here are not real secrets. */
 const DUMMY_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', 'host.docker.internal'])
 
-/** Test/fixture locations: findings here are downgraded, not silenced. */
-const TEST_PATH_RE = /(^|\/)(tests?|__tests__|__mocks__|fixtures)\/|\.(test|spec)\./
+/** Test/fixture locations: findings here are downgraded, not silenced.
+ *  Covers JS (.test./.spec., __tests__/), Go (_test.go), Python (test_*.py,
+ *  *_test.py), and Ruby (spec/, *_spec.rb) conventions. */
+const TEST_PATH_RE =
+  /(^|\/)(tests?|__tests__|__mocks__|fixtures|spec)\/|\.(test|spec)\.|_(test|spec)\.(go|py|rb|exs?)$|(^|\/)(test|spec)_[^/]+\.(py|rb)$/
 
 /**
  * Only the fuzzy generic-password pattern is eligible for the test-fixture
@@ -38,6 +58,13 @@ const TEST_PATH_RE = /(^|\/)(tests?|__tests__|__mocks__|fixtures)\/|\.(test|spec
  * format, which is a real leak even when pasted into a test file.
  */
 const TEST_DOWNGRADEABLE = new Set(['Generic password assignment'])
+
+/**
+ * Database seed / fixture scripts. Their credentials are deliberate, documented
+ * dev defaults, so "treat as compromised, rotate immediately" is the wrong
+ * instruction — the real risk is the seed path reaching a production database.
+ */
+const SEED_PATH_RE = /(^|\/)(seed|seeds|seeders?)(\/|\.|$)|(^|\/)seed[-_.][^/]*$/i
 
 export const secretsAnalyzer: Analyzer = {
   id: 'secrets',
@@ -50,6 +77,7 @@ export const secretsAnalyzer: Analyzer = {
     for (const file of index.files) {
       if (!file.content || SKIP_FILES.test(file.path)) continue
       const isTestContext = TEST_PATH_RE.test(file.path)
+      const isSeedScript = SEED_PATH_RE.test(file.path)
       const lines = file.content.split('\n')
       for (let i = 0; i < lines.length && findings.length < findingLimit; i++) {
         const line = lines[i]
@@ -57,7 +85,33 @@ export const secretsAnalyzer: Analyzer = {
         for (const { name, re } of SECRET_PATTERNS) {
           const match = line.match(re)
           if (!match) continue
-          if (PLACEHOLDER_VALUE.test(match[0])) continue
+          if (RUNTIME_CREDENTIAL_REFERENCE.test(match[0])) continue
+          if (FAKE_LITERAL_VALUE.test(match[0])) {
+            findings.push({
+              category: 'SECURITY_HYGIENE',
+              severity: 'INFO',
+              title: `Credential-shaped placeholder ignored in ${file.path.split('/').pop()}`,
+              description: `Line ${i + 1} of ${file.path} matches a ${name} pattern, but the value announces itself as a placeholder, so it is NOT reported as a leak. Shown only to confirm the scanner read this line — a real credential in the same position would be reported.`,
+              filePath: file.path,
+              line: i + 1,
+              suggestion: 'No action needed. This entry exists so a deliberate skip is never mistaken for a missed detection.',
+              impactScore: 5,
+              effort: 'low',
+              metadata: { credentialType: name, placeholder: true },
+            })
+            break
+          }
+          // A credential committed to source is a single token. Internal
+          // whitespace means the value is display text — a validation message,
+          // an i18n string, a UI label — which nearly every repo has under a
+          // `password:` key. Reported HIGH it would say "rotate immediately"
+          // about a translation, and drag the security score with it.
+          let messageString = false
+          if (name === 'Generic password assignment') {
+            const value = /['"]([^'"]+)['"]/.exec(match[0])?.[1]
+            if (value && CONSTANT_IDENTIFIER_VALUE.test(value)) continue
+            if (value && /\s/.test(value)) messageString = true
+          }
           if (name === 'Database URL with credentials') {
             const hostPort = match[3]
             const host = hostPort.replace(/:\d+$/, '').replace(/^\[|\]$/g, '')
@@ -65,20 +119,42 @@ export const secretsAnalyzer: Analyzer = {
             // (postgres:postgres, admin:admin) on a real host still are.
             if (DUMMY_HOSTS.has(host)) continue
           }
+          // Committed .env files always escalate, even under tests/ or a seed path.
           const isEnvFile = /(^|\/)\.env/.test(file.path)
-          // Committed .env files always escalate, even under tests/.
-          if (isTestContext && TEST_DOWNGRADEABLE.has(name) && !isEnvFile) {
+          const baseName = file.path.split('/').pop()
+          if (!isEnvFile && !messageString && isSeedScript && TEST_DOWNGRADEABLE.has(name)) {
+            findings.push({
+              category: 'SECURITY_HYGIENE',
+              severity: 'MEDIUM',
+              title: `Seed-script credential in ${baseName}`,
+              description: `Line ${i + 1} of ${file.path} sets a ${name} inside a database seed script. Seed defaults are usually intentional, but anyone who can read the repository knows this login, so it becomes a real account the moment seeding runs anywhere reachable.`,
+              filePath: file.path,
+              line: i + 1,
+              suggestion: 'Confirm this seed cannot execute against a production or shared database (guard it on NODE_ENV, keep it out of deploy and migration steps), and generate the value at runtime instead of committing it.',
+              impactScore: 45,
+              effort: 'low',
+              metadata: { credentialType: name, seedScript: true },
+            })
+            break
+          }
+          if (!isEnvFile && (messageString || (isTestContext && TEST_DOWNGRADEABLE.has(name)))) {
             findings.push({
               category: 'SECURITY_HYGIENE',
               severity: 'LOW',
-              title: `Test fixture resembling a secret: ${name} in ${file.path.split('/').pop()}`,
-              description: `Line ${i + 1} of ${file.path} contains a value shaped like a ${name}. It sits in test/fixture code and does not match a production key format, so it is most likely a fixture — but confirm no real credential was pasted.`,
+              title: messageString
+                ? `Message text under a credential-shaped key in ${baseName}`
+                : `Test fixture resembling a secret: ${name} in ${baseName}`,
+              description: messageString
+                ? `Line ${i + 1} of ${file.path} assigns a credential-shaped key a value containing spaces, which reads as display text (a validation message, translation, or label) rather than a credential. Reported for awareness only — confirm no real passphrase was pasted here.`
+                : `Line ${i + 1} of ${file.path} contains a value shaped like a ${name}. It sits in test/fixture code and does not match a production key format, so it is most likely a fixture — but confirm no real credential was pasted.`,
               filePath: file.path,
               line: i + 1,
-              suggestion: 'Use an obviously fake placeholder (e.g. "test-not-a-real-key") so scanners and reviewers can dismiss it at a glance.',
-              impactScore: 25,
+              suggestion: messageString
+                ? 'No action needed if this is user-facing copy. If a real passphrase was pasted here, rotate it and move it to environment configuration.'
+                : 'Use an obviously fake placeholder (e.g. "test-not-a-real-key") so scanners and reviewers can dismiss it at a glance.',
+              impactScore: messageString ? 10 : 25,
               effort: 'low',
-              metadata: { credentialType: name, testContext: true },
+              metadata: { credentialType: name, testContext: isTestContext, messageString },
             })
           } else {
             findings.push({

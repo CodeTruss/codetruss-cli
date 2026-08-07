@@ -10,6 +10,7 @@ import {
   detectPackageManagers,
   detectRepoType,
   looksGenerated,
+  looksMinified,
   parsePyprojectDeps,
   parseRequirementsTxt,
 } from './detect'
@@ -66,6 +67,7 @@ export function vendoredRoot(path: string): string | null {
  */
 export function generatedLabel(content: string): string | null {
   if (looksGenerated(content)) return 'self-declared generated file'
+  if (looksMinified(content)) return 'minified or bundled asset'
   const head = content.slice(0, 4000)
   // Supabase `supabase gen types typescript` — large, header-less, generated.
   if (/\b__InternalSupabase\b/.test(head) && /\bexport type Database\b/.test(head)) {

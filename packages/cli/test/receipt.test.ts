@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createSyncEnvelope, hookSessionId, newSessionId, renderLegacyMarkdown, renderMarkdown, verifyReceipt, writeReceipt } from '../src/receipt.js'
+import { createSyncEnvelope, hookSessionId, newSessionId, renderLegacyMarkdown, renderMarkdown, renderPriorProfileMarkdown, verifyReceipt, writeReceipt } from '../src/receipt.js'
 import { loadSigningKey, sha256, signBytes, verifyBytes } from '../src/signing.js'
 import { LOCAL_ANALYSIS_PROFILE, type Receipt } from '../src/types.js'
 
@@ -59,8 +59,6 @@ describe('signed receipts', () => {
     const markdown = await readFile(paths.markdown, 'utf8')
     expect(markdown).toContain('Policy SHA-256')
     expect(markdown).toContain('Profile: `local-registry-v1`')
-    expect(markdown).toContain('Hosted Health scores: **N/A**')
-    expect(markdown).toContain('Hosted graph and SAST passes were omitted')
     expect(markdown).not.toContain('Final scores:')
     await writeFile(paths.markdown, `${await readFile(paths.markdown, 'utf8')}tampered`)
     await expect(verifyReceipt(dir, receipt.sessionId)).rejects.toThrow('Markdown receipt does not match')
@@ -83,8 +81,57 @@ describe('signed receipts', () => {
     const verified = await verifyReceipt(dir, receipt.sessionId)
     expect(oldMarkdown).toContain('Final scores: health 100')
     expect(renderMarkdown(verified)).toContain('Legacy local receipt')
-    expect(renderMarkdown(verified)).toContain('Hosted Health scores: **N/A**')
+    expect(renderMarkdown(verified)).toContain('**Hosted Health scores.** Not calculated, reported as **N/A**')
     expect(renderMarkdown(verified)).not.toContain('security 100')
+  })
+
+  it('names the omitted passes as detection gaps rather than a missing score', () => {
+    const markdown = renderMarkdown(fixture('/tmp/repo'))
+    const disclosure = markdown.slice(markdown.indexOf('### What did not run'))
+
+    expect(markdown).toContain('### What did not run')
+    // The gap a developer must not misread: injection was never examined.
+    expect(disclosure).toContain('**Security static analysis (SAST).**')
+    expect(disclosure).toMatch(/SQL injection.*command injection.*path traversal/)
+    expect(disclosure).toContain('says nothing either way about those classes')
+    expect(disclosure).toContain('**Hosted symbol graph.**')
+    expect(disclosure).toContain('**Optional LLM review.**')
+    expect(disclosure).toContain('force-disabled under agent hooks')
+    // Never an accusation: the receipt reports what ran, not a verdict on the code.
+    expect(disclosure).not.toMatch(/vulnerab|insecure code|unsafe/i)
+    expect(markdown).toContain('It is not a statement that this change is secure.')
+  })
+
+  it('does not list the LLM review as omitted when a model actually reviewed the diff', () => {
+    const receipt = fixture('/tmp/repo')
+    receipt.llm = {
+      provider: 'anthropic', transmittedBytes: 10,
+      diffCoverage: { reviewedBytes: 13, totalBytes: 13, truncated: false },
+      verdict: 'clean', summary: 'Nothing notable.', findings: [],
+    }
+    const markdown = renderMarkdown(receipt)
+    expect(markdown).toContain('### What did not run')
+    expect(markdown).not.toContain('**Optional LLM review.** No model read this diff')
+    expect(markdown).toContain('## Optional LLM review')
+  })
+
+  it('still verifies a profile receipt whose Markdown carries the superseded wording', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-prior-profile-receipt-'))
+    const dir = join(root, 'receipts')
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const receipt = fixture(root)
+    const paths = await writeReceipt(dir, receipt, 'diff evidence')
+    const priorMarkdown = renderPriorProfileMarkdown(receipt)
+    receipt.evidence.markdownSha256 = sha256(priorMarkdown)
+    const jsonText = `${JSON.stringify(receipt, null, 2)}\n`
+    const key = await loadSigningKey()
+    await writeFile(paths.json, jsonText)
+    await writeFile(paths.markdown, priorMarkdown)
+    await writeFile(paths.signature, `${signBytes(jsonText, key.privateKey)}\n`)
+
+    expect(priorMarkdown).toContain('Hosted Health scores: **N/A**.')
+    expect(priorMarkdown).not.toContain('### What did not run')
+    await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
   })
 
   it('renders explicit optional LLM diff coverage', () => {

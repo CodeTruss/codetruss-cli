@@ -8,70 +8,57 @@ import { verifyDeterministicPackageArchive } from './verify-deterministic-packag
 
 const scriptPath = fileURLToPath(import.meta.url)
 const defaultPackageDir = resolve(dirname(scriptPath), '..')
-const defaultRepoRoot = resolve(defaultPackageDir, '../..')
-const defaultReleaseDir = join(defaultRepoRoot, 'release')
-const defaultReferencePath = join(defaultRepoRoot, 'release-reference.json')
+const defaultDownloadDir = join(resolve(defaultPackageDir, '../..'), 'public', 'downloads')
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 
-export async function verifyRelease({
-  packageDir = defaultPackageDir,
-  releaseDir = defaultReleaseDir,
-  referencePath = defaultReferencePath,
-} = {}) {
+export async function verifyRelease({ packageDir = defaultPackageDir, downloadDir = defaultDownloadDir } = {}) {
   const pkgBytes = await readFile(join(packageDir, 'package.json'))
   const pkg = JSON.parse(pkgBytes.toString('utf8'))
   assertReleasePackagePolicy(pkg)
-  const archiveName = `codetruss-cli-${pkg.version}.tgz`
-  const sbomName = `codetruss-cli-${pkg.version}.sbom.cdx.json`
-  const archive = await readFile(join(releaseDir, archiveName))
-  const sbom = await readFile(join(releaseDir, sbomName))
-  const archiveSha256 = digest(archive)
-  const sbomSha256 = digest(sbom)
-  const entries = verifyDeterministicPackageArchive(archive)
-  const bundle = entries.get('package/dist/cli.cjs')
-  if (!bundle) throw new Error('release archive does not contain the CLI executable')
-  const bundleSha256 = digest(bundle)
-
-  const expectedReference = {
-    schemaVersion: 1,
+  const versionedName = `codetruss-cli-${pkg.version}.tgz`
+  const latestName = 'codetruss-cli-latest.tgz'
+  const versionedSbomName = `codetruss-cli-${pkg.version}.sbom.cdx.json`
+  const versioned = await readFile(join(downloadDir, versionedName))
+  const latest = await readFile(join(downloadDir, latestName))
+  const versionedSbom = await readFile(join(downloadDir, versionedSbomName))
+  const latestSbom = await readFile(join(downloadDir, 'codetruss-cli-latest.sbom.cdx.json'))
+  const versionedSha = digest(versioned)
+  const sbomSha = digest(versionedSbom)
+  const expectedMetadata = {
+    name: pkg.name,
     version: pkg.version,
-    websiteArchive: `https://codetruss.com/downloads/${archiveName}`,
-    archiveSha256,
-    sbomSha256,
-    bundleSha256,
-  }
-  const referenceBytes = await readFile(referencePath)
-  const expectedReferenceBytes = Buffer.from(`${JSON.stringify(expectedReference, null, 2)}\n`, 'utf8')
-  if (!referenceBytes.equals(expectedReferenceBytes)) {
-    throw new Error(`release reference is not the canonical website metadata for ${pkg.version}`)
-  }
-
-  const expectedManifest = {
-    schemaVersion: 1,
-    package: pkg.name,
-    version: pkg.version,
-    tag: `v${pkg.version}`,
-    repository: 'https://github.com/DeliriumPulse/codetruss-cli',
+    url: `/downloads/${versionedName}`,
+    latestUrl: `/downloads/${latestName}`,
+    sha256: versionedSha,
+    sbomUrl: `/downloads/${versionedSbomName}`,
+    sbomSha256: sbomSha,
     node: pkg.engines.node,
-    artifacts: [
-      { name: archiveName, mediaType: 'application/gzip', sha256: archiveSha256 },
-      { name: sbomName, mediaType: 'application/vnd.cyclonedx+json', sha256: sbomSha256 },
-    ],
+    repository: 'https://github.com/DeliriumPulse/codetruss-cli',
+    releaseUrl: `https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v${pkg.version}`,
+    attestationCommand: `gh attestation verify ${versionedName} --repo DeliriumPulse/codetruss-cli`,
   }
-  const manifestBytes = await readFile(join(releaseDir, 'release-manifest.json'))
-  const expectedManifestBytes = Buffer.from(`${JSON.stringify(expectedManifest, null, 2)}\n`, 'utf8')
-  if (!manifestBytes.equals(expectedManifestBytes)) {
-    throw new Error(`release manifest is not canonical for ${archiveName}`)
+  const metadataBytes = await readFile(join(downloadDir, 'codetruss-cli-latest.json'))
+  const expectedMetadataBytes = Buffer.from(`${JSON.stringify(expectedMetadata, null, 2)}\n`, 'utf8')
+  if (!metadataBytes.equals(expectedMetadataBytes)) {
+    throw new Error(`release metadata is not the canonical manifest for CLI ${pkg.version}; run pnpm cli:release`)
   }
+  if (!latest.equals(versioned)) throw new Error(`${latestName} does not match immutable ${versionedName}`)
+  if (!latestSbom.equals(versionedSbom)) throw new Error(`latest release SBOM does not match ${versionedSbomName}`)
 
-  const sidecar = await readFile(join(releaseDir, `${archiveName}.sha256`), 'utf8')
-  if (sidecar !== `${archiveSha256}  ${archiveName}\n`) {
-    throw new Error(`${archiveName}.sha256 is not the canonical checksum for ${archiveName}`)
+  const expectedSidecars = new Map([
+    [`${versionedName}.sha256`, `${versionedSha}  ${versionedName}\n`],
+    [`${latestName}.sha256`, `${versionedSha}  ${latestName}\n`],
+  ])
+  for (const [name, expected] of expectedSidecars) {
+    const sidecar = await readFile(join(downloadDir, name), 'utf8')
+    if (sidecar !== expected) throw new Error(`${name} is not the canonical checksum for ${versionedName}`)
   }
 
   // A checksum can prove that a hosted tarball is immutable without proving
   // that it contains the source being released. Compare every package byte,
-  // including package.json lifecycle scripts and dependency metadata.
+  // including package.json lifecycle scripts and dependency metadata, before a
+  // site build may advertise this artifact.
+  const entries = verifyDeterministicPackageArchive(versioned)
   for (const name of [
     'CHANGELOG.md',
     'LICENSE',
@@ -85,28 +72,28 @@ export async function verifyRelease({
     const local = name === 'package.json' ? pkgBytes : await readFile(join(packageDir, name))
     const packed = entries.get(`package/${name}`)
     if (!packed || !local.equals(packed)) {
-      throw new Error(`${archiveName} does not contain the current ${name}`)
+      throw new Error(`${versionedName} does not contain the current ${name}; bump the CLI version and run pnpm cli:release`)
     }
   }
-  if (!entries.get('package/SBOM.cdx.json').equals(sbom)) {
-    throw new Error(`${sbomName} does not describe the SBOM included in ${archiveName}`)
+  if (!entries.get('package/SBOM.cdx.json').equals(versionedSbom)) {
+    throw new Error(`${versionedSbomName} does not describe the SBOM included in ${versionedName}`)
   }
-  const packagedSbom = JSON.parse(sbom.toString('utf8'))
+  const packagedSbom = JSON.parse(versionedSbom.toString('utf8'))
   if (packagedSbom.metadata?.component?.name !== pkg.name || packagedSbom.metadata?.component?.version !== pkg.version) {
-    throw new Error(`${sbomName} does not identify ${pkg.name}@${pkg.version}`)
+    throw new Error(`${versionedSbomName} does not identify ${pkg.name}@${pkg.version}`)
   }
   const expectedSerialNumber = cycloneDxSerialNumber(pkg.name, pkg.version)
   if (packagedSbom.bomFormat !== 'CycloneDX'
     || packagedSbom.specVersion !== '1.6'
     || packagedSbom.serialNumber !== expectedSerialNumber) {
-    throw new Error(`${sbomName} does not have the canonical CycloneDX identity ${expectedSerialNumber}`)
+    throw new Error(`${versionedSbomName} does not have the canonical CycloneDX identity ${expectedSerialNumber}`)
   }
 
-  return { version: pkg.version, sha256: archiveSha256 }
+  return { version: pkg.version, sha256: versionedSha }
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : undefined
 if (invokedPath === import.meta.url) {
   const result = await verifyRelease()
-  process.stdout.write(`Verified ${result.version} release (${result.sha256})\n`)
+  process.stdout.write(`Verified immutable CodeTruss CLI ${result.version} release (${result.sha256})\n`)
 }

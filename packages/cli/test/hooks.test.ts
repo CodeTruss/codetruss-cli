@@ -824,7 +824,8 @@ describe('exact immutable hook snapshots', () => {
       [CODETRUSS_HOOK_SURFACE_ENV]: 'codex',
       CODETRUSS_HOOK_START_COMMIT: git(root, 'rev-parse', 'HEAD'),
       CODETRUSS_HOOK_END_COMMIT: git(root, 'rev-parse', 'HEAD'),
-      CODETRUSS_HOOK_STARTED_AT: '2026-07-14T10:00:00.000Z',
+      // the spawned CLI checks this against the real clock, so it must stay recent
+      CODETRUSS_HOOK_STARTED_AT: new Date(Date.now() - 5 * 60_000).toISOString(),
       [CODETRUSS_EVIDENCE_OBJECT_DIRECTORY_ENV]: store.objectDirectory,
       [CODETRUSS_HOOK_CONTEXT_PATH_ENV]: contextPath,
       [CODETRUSS_HOOK_CONTEXT_SHA256_ENV]: contextSha256,
@@ -998,6 +999,69 @@ describe('agent hook runtime', () => {
     await expect(handleAgentHook(root, 'codex', {
       session_id: 'session-unknown', hook_event_name: 'PostToolUse', tool_input: { arbitrary: { nested: true } },
     }, config())).resolves.toBeUndefined()
+  })
+
+  it('reports each scope warning once per turn instead of on every tool call', async () => {
+    // The guardrail should be felt, not heard. Repeating the identical warning
+    // on every edit is what makes an always-on hook annoying enough to remove —
+    // but the first notice must still arrive, and a NEW path must still speak.
+    const root = await repo()
+    await writeConfig(root)
+    const prompt = { session_id: 'session-quiet', turn_id: 'turn-q', hook_event_name: 'UserPromptSubmit', prompt: 'Edit things', cwd: root }
+    await handleAgentHook(root, 'claude', prompt, config(['src/**']))
+
+    const edit = (file: string) => handleAgentHook(root, 'claude', {
+      session_id: 'session-quiet', turn_id: 'turn-q', hook_event_name: 'PostToolUse', cwd: root,
+      tool_input: { file_path: file },
+    }, config(['src/**']))
+
+    const first = await edit(join(root, 'infra', 'deploy.tf'))
+    expect(JSON.stringify(first)).toContain('outside the allowed task scope')
+
+    // Same path again in the same turn: already said, stay quiet.
+    const repeat = await edit(join(root, 'infra', 'deploy.tf'))
+    expect(repeat).toBeUndefined()
+
+    // A different out-of-scope path is new information and must be surfaced.
+    const other = await edit(join(root, 'infra', 'secrets.tf'))
+    expect(JSON.stringify(other)).toContain('secrets.tf')
+  })
+
+  it('records a readable task when the harness delivers a machine event, not a human prompt', async () => {
+    // Agent harnesses push background-task notifications and tool results down
+    // the same prompt channel. Dumping that XML verbatim makes the receipt's
+    // headline Task field unreadable — the exact thing a reviewer reads first.
+    const root = await repo()
+    await writeConfig(root)
+    const receipt = join(root, '.codetruss', 'receipts', 'hook.md')
+    await mkdir(join(root, '.codetruss', 'receipts'), { recursive: true })
+    await writeFile(receipt, '# receipt\n')
+    const requests: HookReviewRequest[] = []
+    const runReview = vi.fn(async (request: HookReviewRequest) => {
+      requests.push(request)
+      return hookReviewResponse(request, 'PASS', 0, receipt)
+    })
+    const dependencies = { runReview, now: () => new Date() }
+    await mkdir(join(root, 'src'), { recursive: true })
+    await writeFile(join(root, 'src', 'value.ts'), 'export const value = "before"\n')
+    const notification = [
+      '<task-notification>',
+      '<task-id>b2eypo7jv</task-id>',
+      '<tool-use-id>toolu_01Pqm3pu4ubbnSdKf4jJtCjR</tool-use-id>',
+      '<status>completed</status>',
+      '<summary>Background command "Wait for production to serve CLI 0.2.25" completed (exit code 0)</summary>',
+      '</task-notification>',
+    ].join('\n')
+    const prompt = { session_id: 'session-evt', turn_id: 'turn-evt', hook_event_name: 'UserPromptSubmit', prompt: notification, cwd: root }
+    await expect(handleAgentHook(root, 'codex', prompt, config(['src/**']), dependencies)).resolves.toBeUndefined()
+    await writeFile(join(root, 'src', 'value.ts'), 'export const value = "after"\n')
+    await handleAgentHook(root, 'codex', { ...prompt, hook_event_name: 'Stop', background_tasks: [] }, config(['src/**']), dependencies)
+
+    expect(runReview).toHaveBeenCalledTimes(1)
+    const task = requests[0]!.context.task
+    expect(task).not.toContain('<task-notification>')
+    expect(task).not.toContain('toolu_')
+    expect(task).toContain('Wait for production to serve CLI 0.2.25')
   })
 
   it('captures once, waits for background tasks, reviews immutable final evidence once, and lets PASS stop quietly', async () => {

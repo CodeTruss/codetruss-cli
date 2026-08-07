@@ -29,23 +29,55 @@ export const deadCodeAnalyzer: Analyzer = {
 
     // Entry-point-ish files that are loaded by convention, not by import
     // (proxy.ts is Next 16's middleware — deleting it would drop the auth gate)
-    const CONVENTION = /(page|layout|route|loading|error|not-found|template|default|middleware|proxy|instrumentation|opengraph-image|twitter-image|icon|apple-icon|sitemap|robots|manifest|index|main|app|server|config|next-env|globals)\.[jt]sx?$|\.(d|config|test|spec)\.[cm]?[jt]s$/
+    // `instrumentation-client` / `instrumentation.edge` are the suffixed
+    // variants Next.js and Sentry install; `*.stories.tsx` is collected by
+    // Storybook's glob. Neither is ever imported.
+    const CONVENTION = /(page|layout|route|loading|error|not-found|template|default|middleware|proxy|instrumentation|opengraph-image|twitter-image|icon|apple-icon|sitemap|robots|manifest|index|main|app|server|config|next-env|globals)\.[jt]sx?$|^instrumentation[-.][a-z]+\.[jt]sx?$|\.(stories|story)\.[jt]sx?$|\.(d|config|test|spec)\.[cm]?[jt]s$/
 
-    const allContent = haystackFiles.map((f) => f.content!).join('\n')
+    // package.json script values reference runner entrypoints ("npx tsx
+    // lib/db/seed.ts") — raw manifest JSON satisfies the quoted-ref needle.
+    const manifests = index.files.filter(
+      (f) => f.content && /(^|\/)package\.json$/.test(f.path),
+    )
+    const allContent = haystackFiles
+      .concat(manifests)
+      .map((f) => f.content!)
+      .join('\n')
+
+    // Generated files are indexed with null content, so their imports are
+    // invisible to the needle below. A generated OpenAPI client importing
+    // `core/request.ts` would make that file look orphaned — excluding a file
+    // must never manufacture dead code for the files it uses. Treat everything
+    // under a directory that holds generated output as reachable.
+    const generatedDirs = Object.keys(index.generatedFiles ?? {}).map((p) =>
+      p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : '',
+    )
+    const nearGeneratedOutput = (path: string) =>
+      generatedDirs.some((dir) => (dir === '' ? !path.includes('/') : path.startsWith(dir)))
 
     const candidateLimit = 1500
     for (const file of jsFiles.slice(0, candidateLimit)) {
+      if (nearGeneratedOutput(file.path)) continue
       // CLI/tooling entry points are invoked by runners, not imports
       if (/(^|\/)(scripts|bin|tools)\//.test(file.path)) continue
+      // Next.js Pages Router: the PATH is the route, so nothing imports these.
+      // Anchored at the project root so a `components/pages/` folder is unaffected.
+      if (/^(src\/)?pages\//.test(file.path)) continue
       const base = file.path.split('/').pop()!
       if (CONVENTION.test(base)) continue
+      // Tooling dotfiles (.prettierrc.js, .eslintrc.js) are loaded by name.
+      if (base.startsWith('.')) continue
       const stem = base.replace(/\.[cm]?[jt]sx?$/, '')
       if (stem.length < 3) continue // too ambiguous to match safely
       // Imported anywhere? look for `/stem'`, `/stem"`, or `from './stem`-style
       // refs — or a bare quoted `stem.ext` (a spawn-by-string worker path built
       // from segments, e.g. join(cwd, 'src', 'lib', 'batch-process.ts')).
+      // The final alternative catches a path embedded in a longer command
+      // string — `"sync-stripe": "node --env-file .env sync-stripe.js"` — where
+      // the quote does not directly abut the path.
       const needle = new RegExp(
-        `['"\`](?:[^'"\`]*/${escapeRegExp(stem)}(\\.[cm]?[jt]sx?)?|${escapeRegExp(stem)}\\.[cm]?[jt]sx?)['"\`]`,
+        `['"\`](?:[^'"\`]*/${escapeRegExp(stem)}(\\.[cm]?[jt]sx?)?|${escapeRegExp(stem)}\\.[cm]?[jt]sx?)['"\`]`
+        + `|[\\s/]${escapeRegExp(stem)}\\.[cm]?[jt]sx?(?=[\\s'"\`])`,
       )
       if (!needle.test(allContent)) {
         findings.push({

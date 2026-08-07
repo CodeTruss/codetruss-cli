@@ -107,9 +107,30 @@ export function analyzerResult(output: AnalyzerFinding[]): AnalyzerRunResult {
   return { findings: output, complete: status?.complete ?? true, ...status }
 }
 
+/**
+ * Which passes OUTSIDE the registry run alongside the analyzers in this
+ * execution. The registry is shared, but the passes around it are not: the
+ * hosted pipeline runs SAST for the scan types whose policy includes it, and
+ * the local CLI never runs it at all. An analyzer that discloses coverage has
+ * to be told, because "the SAST engine covers TypeScript" is a fact about the
+ * engine, not about this run.
+ */
+export interface AnalyzerContext {
+  /** The SAST pass (security rules + taint tracking) runs for this analysis. */
+  sast: boolean
+}
+
+/**
+ * Fail-honest default: a caller that does not declare its non-registry passes
+ * is treated as running none of them. A front-end that omits the declaration
+ * therefore over-discloses rather than inheriting a caveat written for a pass
+ * it never executes.
+ */
+export const REGISTRY_ONLY_ANALYSIS: AnalyzerContext = { sast: false }
+
 export interface Analyzer {
   id: string
   name: string
   description: string
-  run(index: RepoIndex): Promise<AnalyzerFinding[]>
+  run(index: RepoIndex, context?: AnalyzerContext): Promise<AnalyzerFinding[]>
 }

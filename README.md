@@ -1,40 +1,25 @@
 # CodeTruss CLI
 
-Review tools ask whether code looks wrong. CodeTruss proves whether the agent
-stayed inside its task contract and whether the exact final Git state passed
-your checks.
+The deterministic first-pass verification gate for AI-written code.
 
-CodeTruss is a local-first guardrail for coding agents. It captures an exact
-before/after Git evidence pair, checks task scope and sensitive surfaces, runs
-the shared CodeTruss analyzers and repository verification commands, then writes
-a signed `PASS`, `REVIEW_REQUIRED`, or `FAILED` receipt before a pull request.
+An agent finishes a change. Something has to look at it before a human does.
+CodeTruss Boundary is that first pass: it captures an exact before/after Git
+evidence pair, checks the change against the task contract you declared, runs 13
+deterministic analyzers and your own project checks, then signs a `PASS`,
+`REVIEW_REQUIRED`, or `FAILED` receipt you can re-verify later.
 
-## Quickstart
+Routine changes clear the checks and pass. Material changes escalate for human
+sign-off. Every verdict leaves a receipt that records the reasons, and the
+receipt also names what never ran.
 
-Install from npm with Node.js 20.9 or newer:
+It is local-first. Nothing is uploaded unless you explicitly run `codetruss sync`.
 
-```bash
-npm install --global @codetruss/cli
-codetruss setup
-```
+## Install
 
-Or run one review without a global install:
-
-```bash
-npx --yes @codetruss/cli review --task "Review my current agent changes"
-```
-
-macOS or Linux shell installer:
+Node.js 20.9 or newer. macOS or Linux:
 
 ```bash
 curl -fsSL https://codetruss.com/install.sh | sh
-codetruss setup
-```
-
-Windows PowerShell:
-
-```powershell
-irm https://codetruss.com/install.ps1 | iex
 codetruss setup
 ```
 
@@ -44,73 +29,113 @@ Homebrew on macOS:
 brew install DeliriumPulse/codetruss/codetruss
 ```
 
-## Claude Code, Codex, and Agent Skills
+Windows PowerShell:
 
-The official open integration wrappers teach coding agents to configure and
-operate the separately installed local CLI. They do not contain another
-analyzer, add an MCP server, or create a new upload path.
-
-Claude Code:
-
-```bash
-claude plugin marketplace add DeliriumPulse/codetruss-plugins
-claude plugin install codetruss@codetruss
+```powershell
+irm https://codetruss.com/install.ps1 | iex
+codetruss setup
 ```
 
-Codex:
+The shell installers resolve the versioned artifact named in
+[`codetruss-cli-latest.json`](https://codetruss.com/downloads/codetruss-cli-latest.json)
+and verify its published SHA-256 digest before installing.
+
+To pin an exact version, install the immutable archive directly:
 
 ```bash
-codex plugin marketplace add DeliriumPulse/codetruss-plugins
-codex plugin add codetruss@codetruss
+npm install --global --ignore-scripts --no-audit --no-fund \
+  https://codetruss.com/downloads/codetruss-cli-0.2.30.tgz
 ```
 
-Agent Skills clients can install the same canonical skill for both Claude Code
-and Codex from the public wrapper repository:
+The `@codetruss/cli` package on the npm registry is published as a separate,
+manually dispatched step and currently trails the website at `0.2.24`. Use the
+installers or the versioned archive above for the current release.
 
-```bash
-npx --yes skills add DeliriumPulse/codetruss-plugins \
-  --skill codetruss --agent claude-code codex -y
-```
-
-See the [live skills.sh listing](https://skills.sh/deliriumpulse/codetruss-plugins/codetruss)
-or [DeliriumPulse/codetruss-plugins](https://github.com/DeliriumPulse/codetruss-plugins)
-for the MIT-licensed manifests, skill instructions, privacy guardrails, and
-marketplace source.
-
-Run `codetruss setup` once at the Git root. It proposes conventional source
-roots without defaulting to repository-wide access, shows detected verification
-commands and their exact trust fingerprint, installs the hooks you select, and
-runs diagnostics. It uploads nothing. Codex asks for one final project-hook
-approval in `/hooks`.
-
-To review an existing change before configuring automation:
+## First run
 
 ```bash
 codetruss review --task "Review my current agent changes"
 codetruss verify latest
 ```
 
-That first receipt needs no account or configuration. Without an allow policy,
-changed files are deliberately unexpected, so the review exits `1` with
-`REVIEW_REQUIRED` and still writes valid signed evidence.
+That first receipt needs no account and no configuration. Without an allow
+policy every changed file is deliberately unexpected, so the review exits `1`
+with `REVIEW_REQUIRED` and still writes valid signed evidence.
 
-Wrap an agent command when you want the task and exact before/after Git states
-captured together:
+Run `codetruss setup` once at the Git root to make it automatic. It proposes
+conventional source roots rather than repository-wide access, shows any detected
+verification commands with their exact trust fingerprint before you trust them,
+installs the hooks you pick, and runs diagnostics. It uploads nothing. Codex asks
+for one final project-hook approval in `/hooks`.
+
+To wrap an agent so the task and both Git states are captured together:
 
 ```bash
 codetruss run --task "Fix auth" --allow "src/auth/**" --verify "pnpm test" -- codex exec "Fix auth"
 ```
 
-Manual hook controls remain available through `codetruss hooks install`,
-`status`, `doctor`, and `uninstall`.
+## Claude Code, Codex, and Agent Skills
+
+The open integration wrappers teach coding agents to configure and operate the
+separately installed CLI. They contain no second analyzer, add no MCP server, and
+create no new upload path.
+
+```bash
+claude plugin marketplace add DeliriumPulse/codetruss-plugins
+claude plugin install codetruss@codetruss
+```
+
+```bash
+codex plugin marketplace add DeliriumPulse/codetruss-plugins
+codex plugin add codetruss@codetruss
+```
+
+Agent Skills clients can install the same canonical skill for both agents:
+
+```bash
+npx --yes skills add DeliriumPulse/codetruss-plugins \
+  --skill codetruss --agent claude-code codex -y
+```
+
+See the [skills.sh listing](https://skills.sh/deliriumpulse/codetruss-plugins/codetruss)
+or [DeliriumPulse/codetruss-plugins](https://github.com/DeliriumPulse/codetruss-plugins)
+for the MIT-licensed manifests, skill instructions, and marketplace source.
+
+## Commands
+
+```text
+codetruss run --task "..." [--allow GLOB] [--deny GLOB] [--verify CMD] [--no-verify]
+              [--llm] [--provider anthropic|openai|claude] -- <agent-cmd>
+codetruss review [--staged] --task "..." [--allow GLOB] [--deny GLOB] [--verify CMD]
+                 [--no-verify] [--llm] [--provider anthropic|openai|claude]
+codetruss report [id|latest] [--json]
+codetruss list [--json]
+codetruss metrics [--json]
+codetruss setup [--allow GLOB] [--deny GLOB] [--hooks all|pre-commit|claude|codex|none]
+                [--trust-verify] [--yes]
+codetruss init [--allow GLOB] [--deny GLOB] [--force]
+codetruss verify [id|latest]
+codetruss sync [id|latest] [--dry-run]
+codetruss auth login|status|logout
+codetruss verify-policy [status|trust|trust-key|revoke]
+codetruss hooks install|status|doctor|uninstall [pre-commit|claude|codex|all]
+```
+
+`verify-policy status`, `trust`, and `revoke` govern whether the repository's
+detected verification commands are trusted to run. `verify-policy trust-key`
+is separate: it appends your local signing key to `signing.publicKeys` so a
+teammate can sign receipts as themselves instead of sharing a private key.
+Commit `.codetruss.yml` afterward so the rest of the team inherits the change.
+It is accepted by the CLI but omitted from the built-in `--help` banner in
+0.2.30.
 
 ## Fail-closed policy
 
-CodeTruss cannot return `PASS` until the approved scope is explicit. Guided
-setup requires at least one useful allow glob; lower-level `codetruss init`
-intentionally starts empty unless `--allow` is supplied. Deny rules win over
-allow rules, and sensitive surfaces such as CI, infrastructure, migrations,
-secrets, dependencies, and lockfiles are flagged independently of scope.
+CodeTruss cannot return `PASS` until the approved scope is explicit. Guided setup
+requires at least one useful allow glob. Lower-level `codetruss init`
+intentionally starts empty unless `--allow` is supplied. Deny rules beat allow
+rules, and sensitive surfaces such as CI, infrastructure, migrations, secrets,
+dependencies, and lockfiles are flagged independently of scope.
 
 ```yaml
 # .codetruss.yml
@@ -130,8 +155,8 @@ llm:
   maxDiffBytes: 200000
 ```
 
-Command-line `--allow`, `--deny`, and `--verify` values can supply the policy for
-one run. Repository configuration cannot redirect authenticated sync traffic;
+Command-line `--allow`, `--deny`, and `--verify` supply the policy for a single
+run. Repository configuration cannot redirect authenticated sync traffic;
 production sync is fixed to `https://codetruss.com`.
 
 ## Verdicts and exit codes
@@ -139,76 +164,107 @@ production sync is fixed to `https://codetruss.com`.
 | Verdict | Exit | Meaning |
 |---|---:|---|
 | `PASS` | 0 | No blocking or review signal was found; any configured verification commands passed. |
-| `REVIEW_REQUIRED` | 1 | Scope drift, a denied or sensitive surface, dependency changes, uncertain attribution, a medium-or-higher finding, or optional local LLM review needs human judgment. |
+| `REVIEW_REQUIRED` | 1 | Scope drift, a denied or sensitive surface, dependency changes, uncertain attribution, a medium-or-higher finding, or optional LLM review needs human judgment. |
 | `FAILED` | 2 | The agent or a verification command failed, evidence is incomplete, or a high/critical security or dependency finding blocks the result. |
 
-Usage and environment errors exit `3`. A receipt records every explicit reason;
-the verdict is not a confidence score.
+Usage and environment errors exit `3`. A receipt records every explicit reason.
+The verdict is not a confidence score.
 
-## Illustrative receipt
+## What a receipt says, including what it did not check
 
-The shortened IDs and hashes below are illustrative sample data, not a customer
-result or validation claim.
+Receipts are written as Markdown and JSON next to hashed patch evidence, and can
+be rechecked later with `codetruss verify latest`. Every receipt states the
+detection gaps in its own body, so a `PASS` is never mistaken for a security
+clearance. Abridged from a real 0.2.30 run:
 
 ```markdown
 # CodeTruss receipt — REVIEW_REQUIRED
 
-- Task: Fix auth callback validation
-- Evidence trees: `a1b2c3…` → `d4e5f6…`
-- Policy SHA-256: `91f0ab…`
+- **Task:** Fix auth callback validation
+- **Evidence trees:** `f8c28a26…` → `52fdebbe…`
+- **Policy SHA-256:** `368f88df…`
 
 ## Verdict: REVIEW_REQUIRED
 
-- 1 file changed outside approved scope: infra/main.tf
+- 1 file(s) changed outside approved scope: infra/main.tf
 - sensitive surfaces changed: infra/main.tf (iac)
 
-## Verification
+## Analysis profile
 
-- `pnpm test` — exit 0
+Profile: `local-registry-v1`.
 
-Diff evidence: complete, SHA-256 `7bc21e…`.
+The 13 deterministic registry analyzers ran locally on this machine.
+
+### What did not run
+
+- **Security static analysis (SAST).** No injection or taint analysis was
+  performed. SQL injection, command injection, code injection, path traversal,
+  SSRF, open redirect, XSS and insecure deserialization were never checked.
+- **Hosted symbol graph.** No cross-file call or data-flow graph was built.
+- **Hosted Health scores.** Not calculated, reported as **N/A**.
+
+A PASS verdict means the passes listed above never ran and the passes that did
+run found nothing new. It is not a statement that this change is secure.
 ```
 
-Receipts are written as Markdown and JSON alongside the hashed patch evidence
-and can be checked later with `codetruss verify latest`.
+SAST and the symbol graph are hosted-only. A local run never performs injection
+or taint analysis.
+
+## Measured accuracy
+
+On a nine-case adversarial corpus of AI-agent bug classes, the analyzers caught
+five at the exact file and line, with zero false positives across eight
+repositories. The four misses are named, each with the reason it needs dataflow
+analysis the local passes do not perform.
+
+Method, per-case reasoning, and the misses are published at
+[codetruss.com/benchmark](https://codetruss.com/benchmark).
 
 ## Privacy
 
-Deterministic `run`, `review`, `report`, `list`, `metrics`, `init`, `setup`,
-`verify`, `verify-policy`, and hook checks run locally without contacting
-CodeTruss. Installing through npm fetches the package from the npm registry; the
-shell installers fetch release metadata and package bytes from CodeTruss.
-Optional review with `--llm --provider anthropic|openai|claude` sends the
-bounded task and diff directly to the
-selected provider using the developer's API key or authenticated local Claude
-Code. CodeTruss receives no receipt unless the developer explicitly runs
-`codetruss sync`; there is no background telemetry or synchronization.
+`run`, `review`, `report`, `list`, `metrics`, `init`, `setup`, `verify`,
+`verify-policy`, and the hook checks are deterministic and run locally without
+contacting CodeTruss. Installing fetches release metadata and package bytes from
+CodeTruss or npm.
 
-`codetruss auth login` contacts CodeTruss device/session endpoints but uploads
-no source, patch, or receipt. `auth status` contacts the session endpoint to
-verify the saved credential. `auth logout` revokes the server-side credential
-before deleting the local copy; if revocation fails, the local copy is retained
-for retry. Neither command sends source, patches, or receipts. Local receipts
-identify the 13-pass `local-registry-v1` analyzer profile and report hosted
-Health scores as N/A; graph and SAST analysis remain part of the hosted full
-audit.
+Optional `--llm --provider anthropic|openai|claude` sends the bounded task and
+diff straight to that provider using your own API key or authenticated local
+Claude Code. It never crosses CodeTruss servers, and it is force-disabled under
+agent hooks so hook receipts stay deterministic. The receipt discloses reviewed
+versus total diff bytes, and truncation prevents `PASS`.
+
+`codetruss sync` is the only command that uploads a receipt, and it strips the
+patch, absolute local path, agent command, raw verification commands and output,
+and signing secrets. There is no background telemetry. `auth login`, `status`,
+and `logout` contact CodeTruss session endpoints only and send no source, patch,
+or receipt.
 
 Agent-turn evidence is held in a private per-turn Git object store under Git
-metadata, is unavailable to ordinary repository Git commands, and is removed
-after the receipt is complete. Synced receipts omit the patch, absolute local
-path, agent command, raw verification commands/output, and signing secrets.
+metadata, is invisible to ordinary repository Git commands, and is removed once
+the receipt is complete.
 
 `.codetruss.yml` is reviewable repository policy and may be committed.
-`.codetruss/` contains local receipts, patches, signatures, snapshots, and
-generated hook runners. CodeTruss adds that evidence root to the
-repository-local Git exclude and refuses future operations if evidence becomes
-tracked or is routed through an unsafe path.
+`.codetruss/` holds local receipts, patches, signatures, snapshots, and generated
+hook runners. CodeTruss adds that evidence root to the repository-local Git
+exclude and refuses to operate if evidence becomes tracked or is routed through
+an unsafe path.
+
+## Pricing
+
+The CLI is free forever. Installing it, running every command above, and
+producing signed receipts cost nothing and always will. There is no seat count,
+no trial clock, and no feature that stops working once you depend on it.
+
+The paid line sits at the network boundary: local stays free, hosted is billed.
+The hosted side starts free, then receipt History at $9/mo, Pro at $19 per seat,
+Team at $15 per seat with a 5-seat minimum, and Agency at $249/mo including 15
+client workspaces. See [codetruss.com/pricing](https://codetruss.com/pricing).
 
 ## Source and development
 
-This repository contains the CLI and its DB-free analyzer engine. The published
-npm package and GitHub release archive contain the same bundled executable with
-no runtime npm dependencies.
+This repository mirrors the released CLI and its DB-free analyzer engine. The
+published archive contains one bundled executable with no runtime npm
+dependencies.
 
 ```bash
 corepack enable
@@ -217,22 +273,21 @@ pnpm install --frozen-lockfile
 pnpm validate
 ```
 
-`pnpm validate` typechecks, builds the deterministic release, runs the source
-and adversarial release tests, verifies the exact website reference, and
-exercises a clean global install.
+`pnpm validate` typechecks, builds the deterministic release, runs the source and
+adversarial release tests, verifies the result byte-for-byte against the exact
+published website artifact recorded in `release-reference.json`, and exercises a
+clean global install.
 
-Release output is written to `release/`. Verify a GitHub release attestation
-with:
+Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-VERSION.tgz --repo DeliriumPulse/codetruss-cli
+gh attestation verify codetruss-cli-0.2.30.tgz --repo DeliriumPulse/codetruss-cli
+shasum -a 256 -c codetruss-cli-0.2.30.tgz.sha256
 ```
 
-Tag-driven GitHub releases and attestations do not depend on npm credentials.
-The public `@codetruss/cli` package is published by an explicitly confirmed
-workflow that sends the already-attested release bytes to npm. Maintainers
-should follow [docs/RELEASE.md](docs/RELEASE.md) for the trusted-publishing
-controls.
+Maintainers should follow [docs/RELEASE.md](docs/RELEASE.md). Tag-driven GitHub
+releases and attestations do not depend on npm credentials; npm publication is a
+separate, explicitly confirmed workflow that sends the already-attested bytes.
 
 ## License and support
 

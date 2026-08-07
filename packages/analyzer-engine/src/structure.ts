@@ -107,18 +107,26 @@ export const structureAnalyzer: Analyzer = {
     const generatedFiles = index.generatedFiles ?? {}
     const generatedPaths = Object.keys(generatedFiles)
     const generatedLoc = Object.values(generatedFiles).reduce((a, b) => a + b, 0)
-    if (generatedPaths.length > 0 && generatedLoc >= 500) {
+    // Minified bundles pack thousands of statements onto a handful of lines, so
+    // their LOC understates the excluded volume by orders of magnitude. Gate and
+    // report on BYTES too, or a 570KB vendored payload disappears silently.
+    const generatedBytes = index.files
+      .filter((f) => f.kind === 'generated')
+      .reduce((total, f) => total + (f.sizeBytes ?? 0), 0)
+    const generatedKb = Math.round(generatedBytes / 1024)
+    if (generatedPaths.length > 0 && (generatedLoc >= 500 || generatedBytes >= 50_000)) {
       const plural = generatedPaths.length > 1
+      const volume = `~${generatedLoc.toLocaleString()} LOC, ${generatedKb.toLocaleString()} KB`
       findings.push({
         category: 'STRUCTURE',
         severity: 'LOW',
-        title: `Generated code excluded from analysis (${generatedPaths.length} file${plural ? 's' : ''}, ~${generatedLoc.toLocaleString()} LOC)`,
-        description: `CodeTruss detected ${generatedPaths.length} machine-generated file${plural ? 's' : ''} (~${generatedLoc.toLocaleString()} LOC, e.g. \`${generatedPaths[0]}\`) and excluded ${plural ? 'them' : 'it'} from LOC totals, scores, and the architecture graph so ${plural ? 'they' : 'it'} don't inflate metrics or produce spurious "oversized file" / "duplicated logic" findings.`,
+        title: `Generated code excluded from analysis (${generatedPaths.length} file${plural ? 's' : ''}, ${generatedKb.toLocaleString()} KB)`,
+        description: `CodeTruss detected ${generatedPaths.length} machine-generated or minified file${plural ? 's' : ''} (${volume}, e.g. \`${generatedPaths[0]}\`) and excluded ${plural ? 'them' : 'it'} from LOC totals, scores, and the architecture graph so ${plural ? 'they' : 'it'} don't inflate metrics or produce spurious "oversized file" / "duplicated logic" findings. Minified bundles report few lines for their size, so the KB figure is the honest measure of what was skipped.`,
         filePath: generatedPaths[0],
-        suggestion: 'Keep generated files out of review scope — regenerate them at build time, or mark them linguist-generated in .gitattributes.',
+        suggestion: 'Keep generated and vendored bundles out of review scope — regenerate them at build time, or mark them linguist-generated in .gitattributes.',
         impactScore: 20,
         effort: 'low',
-        metadata: { files: generatedPaths.length, loc: generatedLoc },
+        metadata: { files: generatedPaths.length, loc: generatedLoc, bytes: generatedBytes },
       })
     }
 
