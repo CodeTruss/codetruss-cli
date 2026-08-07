@@ -88,7 +88,18 @@ async function resolveAllowGlobs(
   if (explicit?.length) return explicit
   const suggestions = await suggestedAllowGlobs(root)
   if (yes) {
-    throw new Error('non-interactive setup requires at least one explicit --allow "src/**" value')
+    // Plug and play: an unattended run on an ordinary repository should end up
+    // protected rather than stopped to look up glob syntax. Only conventional
+    // roots that actually exist on disk are adopted, never a repository-wide
+    // glob, and the choice is printed so an unattended decision stays
+    // auditable. Verification-command trust is the genuinely dangerous
+    // decision and is still withheld unless --trust-verify is passed.
+    const detected = suggestions.filter((glob) => !repositoryWide(glob))
+    if (!detected.length) {
+      throw new Error('non-interactive setup requires at least one explicit --allow "src/**" value')
+    }
+    write(`Adopted detected allowed change roots: ${detected.join(', ')}\n`)
+    return detected
   }
 
   if (suggestions.length) {
@@ -164,9 +175,17 @@ export async function guidedSetup(root: string, options: GuidedSetupOptions = {}
     } else {
       const selectedAllow = await resolveAllowGlobs(root, allow, yes, ask, write)
       const selectedDeny = deny ?? []
+      // Unattended setup must never record commands it has no permission to
+      // run: an untrusted verify list makes every later review exit 3 with no
+      // receipt, which is worse than having no verification configured.
+      // Only when hooks will actually be installed: with --hooks none there is
+      // nothing to block, and recording untrusted commands for later inspection
+      // is the point of that flow.
+      const withheldVerify = yes && !options.trustVerify && requestedHooks !== 'none'
       const path = await initialize(root, false, {
         allow: selectedAllow,
         deny: selectedDeny,
+        ...(withheldVerify ? { verify: [] } : {}),
       })
       write(`Saved policy: ${path}\n`)
     }
@@ -199,7 +218,7 @@ export async function guidedSetup(root: string, options: GuidedSetupOptions = {}
           await trustVerifyCommands(root, config.verify)
           write('Trusted the exact verification command list shown above.\n')
         } else if (yes) {
-          throw new Error('automatic setup will not trust repository commands via --yes; inspect the commands above and rerun with --trust-verify')
+          write('Verification commands are NOT trusted and were left out of the policy; inspect them, then run codetruss verify-policy trust (or rerun setup with --trust-verify) to enable them.\n')
         } else {
           const approval = await ask('Type "trust" to approve this exact command list for automatic checks: ')
           if (approval.trim().toLowerCase() !== 'trust') {

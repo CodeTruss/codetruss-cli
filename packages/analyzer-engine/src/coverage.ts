@@ -1,5 +1,6 @@
-import type { Analyzer, AnalyzerFinding } from './types'
+import type { Analyzer, AnalyzerContext, AnalyzerFinding } from './types'
 import type { RepoIndex } from './types'
+import { REGISTRY_ONLY_ANALYSIS } from './types'
 import { SUPPORTED_TREESITTER_LANGS } from './support'
 import { SAST_COVERED_LANGUAGES } from './support'
 
@@ -18,10 +19,18 @@ import { SAST_COVERED_LANGUAGES } from './support'
  *
  *  - SECURITY (injection, untrusted-input, deserialization): a real SAST engine
  *    (rules + taint tracking) runs for the languages it covers
- *    (SAST_COVERED_LANGUAGES). For those languages the security axis is EARNED —
- *    real vulns lower it, genuinely clean code scores high. For every other
- *    language we run only regex secret scanning — that is not a security review,
- *    so a clean security axis there means "we didn't look", not "it's safe".
+ *    (SAST_COVERED_LANGUAGES) IN THE PROFILES THAT INCLUDE THAT PASS. For those
+ *    languages the security axis is EARNED — real vulns lower it, genuinely
+ *    clean code scores high. For every other language we run only regex secret
+ *    scanning — that is not a security review, so a clean security axis there
+ *    means "we didn't look", not "it's safe".
+ *
+ *    Language support is only half of that premise. The SAST pass lives outside
+ *    this registry, so whether it runs at all is a property of the caller
+ *    (AnalyzerContext.sast), not of the languages present: a hosted QUICK scan
+ *    and every local CLI run execute the registry without it. When the pass did
+ *    not run, "TypeScript is SAST-covered" says nothing about this analysis, and
+ *    staying silent would be the blind spot the module exists to prevent.
  *
  * Everything outside the structure set is *surface-scanned* — structure regex,
  * secrets, file size, docs — with no architecture, flow, or complexity
@@ -160,6 +169,8 @@ export function analysisCoverage(index: RepoIndex): AnalysisCoverage {
  *
  *  - Genuinely unsupported language (no extractor, no tree-sitter): the strong
  *    "limited analysis" caveat — architecture/flow/complexity were NOT analyzed.
+ *  - SAST pass absent from this profile while the repo has code it would have
+ *    covered: the pass-level caveat — the injection classes were never examined.
  *  - Tree-sitter language (structure fully analyzed, security surface-only): the
  *    nuanced caveat — structure is real, security is secret-scanning only.
  */
@@ -168,7 +179,7 @@ export const coverageAnalyzer: Analyzer = {
   name: 'Analysis coverage',
   description:
     'Discloses the depth of analysis per language so a clean report is not misread as a full architecture + security review.',
-  async run(index: RepoIndex): Promise<AnalyzerFinding[]> {
+  async run(index: RepoIndex, context: AnalyzerContext = REGISTRY_ONLY_ANALYSIS): Promise<AnalyzerFinding[]> {
     const coverage = analysisCoverage(index)
 
     if (coverage.structureLimited) {
@@ -204,6 +215,48 @@ export const coverageAnalyzer: Analyzer = {
       ]
     }
 
+    // The SAST pass is not in this registry, so a profile can omit it entirely.
+    // When it did and the repo holds a meaningful amount of code that pass
+    // covers, silence would read as "nothing found" for classes nobody looked
+    // for — the exact misreading the language caveats below exist to prevent.
+    if (!context.sast && coverage.securityLoc >= MIN_ANALYZABLE_LOC) {
+      const sastLanguages = Object.entries(index.languages)
+        .filter(([lang]) => isSecurityDeep(lang))
+        .sort((a, b) => b[1] - a[1])
+        .map(([lang]) => lang)
+      return [
+        {
+          category: 'SECURITY_HYGIENE',
+          severity: 'INFO',
+          title: 'Security static analysis did not run in this analysis profile',
+          description:
+            `This analysis ran the deterministic registry analyzers only. The SAST pass — the ` +
+            `security rule pack plus taint tracking from untrusted source to dangerous sink — is ` +
+            `not part of this profile, so it never examined the ${sastLanguages.join(', ')} code ` +
+            `here (${coverage.securityLoc} lines). The classes that pass owns were not checked at ` +
+            `all: SQL injection, command injection, code injection, path traversal, SSRF, open ` +
+            `redirect, XSS and insecure deserialization, plus the pattern rules for hardcoded ` +
+            `credentials, disabled TLS validation, weak hashes and ciphers, and insecure ` +
+            `randomness. Secret scanning, dependency advisories and every other registry pass did ` +
+            `run and their results stand. Read the absence of injection findings as "that analysis ` +
+            `did not run", not "this code is clean" — this says nothing either way about whether ` +
+            `the code is vulnerable.`,
+          suggestion:
+            `Do not treat this run as an injection-class security review. A hosted SECURITY or ` +
+            `FULL_AUDIT scan runs the SAST pass over the same code and reports what it finds.`,
+          impactScore: 20,
+          effort: 'low',
+          metadata: {
+            sastPassRan: false,
+            securityRatio: coverage.securityRatio,
+            securityLoc: coverage.securityLoc,
+            totalLoc: coverage.totalLoc,
+            sastLanguages,
+          },
+        },
+      ]
+    }
+
     if (coverage.securityLimited) {
       const lang =
         coverage.primaryLanguage ?? coverage.structureOnlyLanguages[0] ?? 'this language'
@@ -211,18 +264,18 @@ export const coverageAnalyzer: Analyzer = {
         {
           category: 'SECURITY_HYGIENE',
           severity: 'INFO',
-          title: `Security is surface-only for ${lang}`,
+          title: `Security coverage is partial for ${lang}`,
           description:
             `Structure and complexity for ${lang} are fully analyzed via AST parsing — the ` +
-            `architecture, call-graph and health scores reflect the real code. Security, however, ` +
-            `is surface-only: CodeTruss ran secret scanning (regex) over ${lang}, NOT a full ` +
-            `security review. CodeTruss's SAST engine (security rules + taint tracking for ` +
-            `injection, untrusted-input and deserialization) runs only for TypeScript, JavaScript ` +
-            `and Python. Read the security score as "no leaked secrets found", not "this code is ` +
-            `secure".`,
+            `architecture, call-graph and health scores reflect the real code. Security coverage ` +
+            `is partial, not absent: CodeTruss ran secret scanning plus the pattern and dataflow ` +
+            `rules that apply to ${lang}, but its untrusted-input catalog is tuned for TypeScript, ` +
+            `JavaScript and Python, so injection and deserialization coverage for ${lang} is ` +
+            `narrower than for those languages. Read the security score as "nothing found by the ` +
+            `checks that ran", not "this code is secure".`,
           suggestion:
-            `Treat the security score as secret-scanning coverage only for ${lang}. A manual ` +
-            `security review is still warranted for injection, untrusted input and deserialization.`,
+            `Treat the security score for ${lang} as partial coverage. A manual security review ` +
+            `is still warranted for injection, untrusted input and deserialization.`,
           impactScore: 20,
           effort: 'low',
           metadata: {

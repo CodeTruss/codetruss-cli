@@ -2,9 +2,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { realpath, rmdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { analyzeRepository, analysisEvidenceIssues, analyzerReceipt, computeVerdict, diffFindings } from './analysis.js'
+import { analyzeRepository, analysisCoverageNotes, analysisEvidenceIssues, analyzerReceipt, computeVerdict, diffFindings } from './analysis.js'
 import { loadSyncAuthentication } from './auth-storage.js'
-import { initialize, loadConfig, receiptDir } from './config.js'
+import { CONFIG_FILE, initialize, loadConfig, receiptDir, trustLocalSigningKey } from './config.js'
 import {
   allocatedVerificationTimeout,
   captureDiffEvidence,
@@ -356,7 +356,7 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
   if (requestedProvider && config.llm.model && config.llm.provider && config.llm.provider !== requestedProvider) {
     throw new Error(`--provider ${requestedProvider} conflicts with model ${config.llm.model} configured for ${config.llm.provider}`)
   }
-  await requireTrustedSigningKey(config.signing.publicKey)
+  await requireTrustedSigningKey(config.signing.publicKeys)
   const options: ReviewOptions = {
     mode, task,
     allow: many(parsed, 'allow', config.allow),
@@ -461,6 +461,8 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
       ...finalEvidenceIssues.map((issue) => `final ${issue}`),
       ...(diff.truncated ? [`diff capture retained ${diff.capturedBytes} of ${diff.totalBytes} bytes`] : []),
     ]
+    // Coverage gaps small enough to leave the index authoritative: reported, not fatal.
+    const advisoryEvidenceIssues = analysisCoverageNotes(analysis.index.coverage).map((issue) => `final ${issue}`)
 
     const verifications = []
     for (const [commandIndex, command] of options.verify.entries()) {
@@ -536,6 +538,7 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
       llm,
       evidenceIssues,
       baselineEvidenceIssues: finalEvidenceIssues.length === 0 ? baselineEvidenceIssues : [],
+      advisoryEvidenceIssues,
     })
     if (llmFailure) { outcome.verdict = 'FAILED'; outcome.reasons.unshift(`requested LLM review failed: ${llmFailure}`) }
     const finishedAt = new Date()
@@ -711,6 +714,16 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
     const deny = many(parsed, 'deny', [])
     const path = await initialize(root, parsed.booleans.has('force'), { allow, deny })
     process.stdout.write(`${path}\n`)
+    // init auto-detects verification commands, but running them requires an
+    // explicit trust decision. Without this notice the next `review` exits 3
+    // with no receipt at all — a dead end on the very first run.
+    const detectedVerify = (await loadConfig(root)).verify
+    if (detectedVerify.length > 0) {
+      process.stdout.write(
+        `Detected verification commands (${detectedVerify.join(', ')}). They are not trusted until you approve them.\n`
+        + 'Run: codetruss verify-policy trust\n',
+      )
+    }
     if (allow.length === 0) {
       process.stdout.write(
         'No allow globs configured: changed paths remain unexpected, and agent hooks cannot be installed until .codetruss.yml defines at least one allow glob.\n'
@@ -723,7 +736,7 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   const dir = receiptDir(root, config)
   if (parsed.command === 'run' || parsed.command === 'review') return executeReview(parsed, root, config)
   if (parsed.command === 'report') {
-    const receipt = await verifyReceipt(dir, parsed.positionals[0] ?? 'latest', config.signing.publicKey)
+    const receipt = await verifyReceipt(dir, parsed.positionals[0] ?? 'latest', config.signing.publicKeys)
     process.stdout.write(parsed.booleans.has('json') ? `${JSON.stringify(receipt, null, 2)}\n` : renderMarkdown(receipt))
     return 0
   }
@@ -736,12 +749,26 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   }
   if (parsed.command === 'metrics') {
     const metrics = await collectLocalMetrics(root, dir, config.signing.publicKey)
-    process.stdout.write(parsed.booleans.has('json') ? `${JSON.stringify(metrics, null, 2)}\n` : renderLocalMetrics(metrics))
+    process.stdout.write(parsed.booleans.has('json') ? `${JSON.stringify(metrics, null, 2)}
+` : renderLocalMetrics(metrics))
     return 0
   }
-  if (parsed.command === 'verify') { const receipt = await verifyReceipt(dir, parsed.positionals[0] ?? 'latest', config.signing.publicKey); process.stdout.write(`verified ${receipt.sessionId} (${receipt.verdict})\n`); return 0 }
+  if (parsed.command === 'verify') { const receipt = await verifyReceipt(dir, parsed.positionals[0] ?? 'latest', config.signing.publicKeys); process.stdout.write(`verified ${receipt.sessionId} (${receipt.verdict})
+`); return 0 }
   if (parsed.command === 'verify-policy') {
     const action = parsed.positionals[0] ?? 'status'
+    // Key trust is independent of verification commands: a repository with no
+    // verify commands still pins signers, and a blocked teammate must be able
+    // to add their key here.
+    if (action === 'trust-key') {
+      const result = await trustLocalSigningKey(root)
+      process.stdout.write(
+        result.status === 'added'
+          ? `added signing key ${result.fingerprint}; this repository now trusts ${result.total} signer(s)\nCommit ${CONFIG_FILE} so your teammates inherit the change.\n`
+          : `signing key ${result.fingerprint} is already trusted by this repository\n`,
+      )
+      return 0
+    }
     if (!config.verify.length) { process.stdout.write('No repository verification commands are configured.\n'); return 0 }
     if (action === 'status') {
       const trust = await verifyCommandTrustStatus(root, config.verify)
@@ -758,10 +785,10 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
       process.stdout.write(`revoked ${trust.hash}\n`)
       return 0
     }
-    throw new Error(`unknown verify-policy action ${action}; expected status, trust, or revoke`)
+    throw new Error(`unknown verify-policy action ${action}; expected status, trust, trust-key, or revoke`)
   }
   if (parsed.command === 'sync') {
-    const receipt = await verifyReceipt(dir, parsed.positionals[0] ?? 'latest', config.signing.publicKey)
+    const receipt = await verifyReceipt(dir, parsed.positionals[0] ?? 'latest', config.signing.publicKeys)
     const envelope = await createSyncEnvelope(receipt)
     if (parsed.booleans.has('dry-run')) { process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`); return 0 }
     const authentication = await loadSyncAuthentication()

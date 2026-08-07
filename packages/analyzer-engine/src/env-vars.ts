@@ -1,5 +1,19 @@
 import type { Analyzer, AnalyzerFinding } from './types'
 
+/**
+ * A committed runtime .env file (test fixtures excluded, mirroring the
+ * structure analyzer's own gate). Its presence means the structure analyzer
+ * already owns the "missing .env.example" finding for this repository.
+ */
+function hasRuntimeEnvFile(index: { files: Array<{ path: string }> }): boolean {
+  return index.files.some(
+    (f) =>
+      /\.env(\.|$)/.test(f.path.split('/').pop() ?? '') &&
+      !/^\.env\.example$/.test(f.path) &&
+      !/(^|\/)(tests?|__tests__|__mocks__|fixtures)\//i.test(f.path),
+  )
+}
+
 /** Environment variable usage vs. documentation drift. */
 export const envVarsAnalyzer: Analyzer = {
   id: 'env-vars',
@@ -78,9 +92,13 @@ export const envVarsAnalyzer: Analyzer = {
         effort: 'low',
         metadata: { variables: undocumented.slice(0, 50) },
       })
-    } else if (index.repoType !== 'library') {
+    } else if (index.repoType !== 'library' && !hasRuntimeEnvFile(index)) {
       // No template at all: one LOW nudge, not a per-var wall. Libraries have
       // no deploy environment, so skip them entirely.
+      //
+      // Suppressed when a runtime .env file exists, because the structure
+      // analyzer already reports the missing template for that case — the
+      // reader was otherwise shown two rows demanding the same single action.
       findings.push({
         category: 'DOCUMENTATION',
         severity: 'LOW',

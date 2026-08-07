@@ -1,5 +1,12 @@
 import { getAnalyzers } from './registry'
-import { analyzerResult, type AnalyzerFinding, type AnalyzerRunResult, type RepoIndex } from './types'
+import {
+  analyzerResult,
+  REGISTRY_ONLY_ANALYSIS,
+  type AnalyzerContext,
+  type AnalyzerFinding,
+  type AnalyzerRunResult,
+  type RepoIndex,
+} from './types'
 
 export interface AnalyzerPass {
   id: string
@@ -10,12 +17,13 @@ export interface AnalyzerPass {
 /** Run every deterministic analyzer without allowing one failed pass to abort the suite. */
 export async function runAnalyzers(
   index: RepoIndex,
+  context: AnalyzerContext = REGISTRY_ONLY_ANALYSIS,
 ): Promise<{ findings: AnalyzerFinding[]; passes: AnalyzerPass[] }> {
   const findings: AnalyzerFinding[] = []
   const passes: AnalyzerPass[] = []
   for (const analyzer of getAnalyzers()) {
     try {
-      const raw = analyzerResult(await analyzer.run(index))
+      const raw = analyzerResult(await analyzer.run(index, context))
       const result = {
         ...raw,
         findings: raw.findings.map((finding) => ({ ...finding, analyzerId: analyzer.id })),

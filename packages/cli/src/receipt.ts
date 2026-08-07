@@ -81,7 +81,48 @@ function legacyScoreLines(receipt: Receipt): string[] {
   ]
 }
 
+/**
+ * The omitted passes named as detection gaps, not as a scoring footnote.
+ *
+ * Earlier wording reported the omission only through "Hosted Health scores:
+ * N/A", which a developer reads as "no score" — not as "injection was never
+ * checked". A receipt is evidence of what ran, so the absent passes get their
+ * own section, named as the detection they cost rather than the number.
+ */
 function analysisProfileLines(receipt: Receipt): string[] {
+  const current = 'analysisProfile' in receipt.analyzers && receipt.analyzers.analysisProfile
+  return [
+    '## Analysis profile',
+    '',
+    ...(current ? [
+      `Profile: \`${current.id}\`.`,
+      '',
+      'The 13 deterministic registry analyzers ran locally on this machine.',
+    ] : [
+      'Legacy local receipt. Earlier CLI versions emitted numeric scores without hosted graph and SAST; those values are suppressed.',
+    ]),
+    '',
+    '### What did not run',
+    '',
+    '- **Security static analysis (SAST).** No injection or taint analysis was performed. SQL injection, command injection, code injection, path traversal, SSRF, open redirect, XSS and insecure deserialization were never checked, so this receipt says nothing either way about those classes.',
+    '- **Hosted symbol graph.** No cross-file call or data-flow graph was built, so architecture and dead-code conclusions cover only what the local passes can see in isolation.',
+    ...(receipt.llm ? [] : [
+      '- **Optional LLM review.** No model read this diff. It is opt-in via `--llm` and is force-disabled under agent hooks, so a hook receipt is always deterministic evidence only.',
+    ]),
+    '- **Hosted Health scores.** Not calculated, reported as **N/A**. The scores are defined over the graph and SAST passes; a number derived from this pass set would overstate what ran.',
+    '',
+    'A PASS verdict means the passes listed above never ran and the passes that did run found nothing new. It is not a statement that this change is secure.',
+    '',
+    '[Run a hosted full audit](https://codetruss.com/dashboard/repos/new?source=cli-receipt).',
+  ]
+}
+
+/**
+ * The profile block exactly as CLI 0.2.28 and earlier wrote it. Kept verbatim
+ * so `codetruss verify` still reproduces Markdown that was signed before the
+ * disclosure was reworded; the signed JSON is unchanged, only its rendering.
+ */
+function priorProfileLines(receipt: Receipt): string[] {
   const current = 'analysisProfile' in receipt.analyzers && receipt.analyzers.analysisProfile
   return [
     '## Analysis profile',
@@ -100,7 +141,16 @@ function analysisProfileLines(receipt: Receipt): string[] {
   ]
 }
 
-function renderMarkdownInternal(receipt: Receipt, preserveLegacyScores: boolean): string {
+/** Which historical rendering of the analysis block to reproduce. */
+type ReceiptMarkdownVariant = 'current' | 'legacy-scores' | 'prior-profile'
+
+function analysisLines(receipt: Receipt, variant: ReceiptMarkdownVariant): string[] {
+  if (variant === 'legacy-scores') return legacyScoreLines(receipt)
+  if (variant === 'prior-profile') return priorProfileLines(receipt)
+  return analysisProfileLines(receipt)
+}
+
+function renderMarkdownInternal(receipt: Receipt, variant: ReceiptMarkdownVariant): string {
   const lines = [
     `# CodeTruss receipt — ${receipt.verdict}`,
     '',
@@ -130,7 +180,7 @@ function renderMarkdownInternal(receipt: Receipt, preserveLegacyScores: boolean)
     '|---|---|---|---|',
     ...receipt.analyzers.findings.slice(0, 100).map((finding) => `| ${finding.severity} | ${finding.analyzerId ?? 'unknown'} | ${finding.filePath ? `\`${finding.filePath}${finding.line ? `:${finding.line}` : ''}\`` : 'repository'} | ${finding.title.replaceAll('|', '\\|')} |`),
     '',
-    ...(preserveLegacyScores ? legacyScoreLines(receipt) : analysisProfileLines(receipt)),
+    ...analysisLines(receipt, variant),
     ...(receipt.analyzers.delta ? [
       `Finding delta: ${receipt.analyzers.delta.introduced} introduced, ${receipt.analyzers.delta.worsened} worsened, ${receipt.analyzers.delta.recurring} recurring, ${receipt.analyzers.delta.resolved} resolved.`,
     ] : []),
@@ -159,12 +209,17 @@ function renderMarkdownInternal(receipt: Receipt, preserveLegacyScores: boolean)
 
 /** Render the current honest local profile, including when displaying a legacy receipt. */
 export function renderMarkdown(receipt: Receipt): string {
-  return renderMarkdownInternal(receipt, false)
+  return renderMarkdownInternal(receipt, 'current')
 }
 
 /** Byte-compatible renderer used only to verify Markdown written by older receipt-v1 clients. */
 export function renderLegacyMarkdown(receipt: Receipt): string {
-  return renderMarkdownInternal(receipt, true)
+  return renderMarkdownInternal(receipt, 'legacy-scores')
+}
+
+/** Byte-compatible renderer for profile receipts signed before the disclosure was reworded. */
+export function renderPriorProfileMarkdown(receipt: Receipt): string {
+  return renderMarkdownInternal(receipt, 'prior-profile')
 }
 
 async function writePrivateAtomic(path: string, value: string | Buffer): Promise<void> {
@@ -216,7 +271,7 @@ export async function resolveReceipt(dir: string, id = 'latest'): Promise<{ rece
   return { receipt: JSON.parse(await readFile(jsonPath, 'utf8')) as Receipt, jsonPath }
 }
 
-export async function verifyReceipt(dir: string, id = 'latest', pinnedPublicKey?: string): Promise<Receipt> {
+export async function verifyReceipt(dir: string, id = 'latest', pinnedPublicKey?: string | string[]): Promise<Receipt> {
   const { receipt, jsonPath } = await resolveReceipt(dir, id)
   if (receipt.git && ![receipt.git.baselineTree, receipt.git.finalTree].every((oid) => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(oid))) {
     throw new Error('receipt evidence tree object id is invalid')
@@ -225,21 +280,34 @@ export async function verifyReceipt(dir: string, id = 'latest', pinnedPublicKey?
     throw new Error('receipt policy SHA-256 is invalid')
   }
   if (!receipt.evidence.publicKey || !receipt.evidence.signatureFile) throw new Error('receipt is unsigned')
-  const trustedPublicKey = pinnedPublicKey ? normalizePublicKey(pinnedPublicKey) : (await loadSigningKey()).publicKey
+  // A repository may trust several signers (one per developer). The receipt is
+  // valid when its embedded key is one of them, and the signature is then
+  // checked against that exact key — so a teammate's receipt verifies without
+  // anyone sharing a private key.
+  const pins = Array.isArray(pinnedPublicKey) ? pinnedPublicKey : pinnedPublicKey ? [pinnedPublicKey] : []
+  const trustedPublicKeys = pins.length > 0
+    ? pins.map((pin) => normalizePublicKey(pin))
+    : [(await loadSigningKey()).publicKey]
   const embeddedPublicKey = normalizePublicKey(receipt.evidence.publicKey)
   const embeddedFingerprint = publicKeyFingerprint(embeddedPublicKey)
-  const trustedFingerprint = publicKeyFingerprint(trustedPublicKey)
+  const trustedFingerprints = trustedPublicKeys.map((key) => publicKeyFingerprint(key))
   if (receipt.evidence.keyFingerprint !== embeddedFingerprint) throw new Error('receipt signing fingerprint does not match its public key')
-  if (embeddedFingerprint !== trustedFingerprint) {
-    throw new Error(`receipt signer ${embeddedFingerprint} does not match trusted key ${trustedFingerprint}`)
+  if (!trustedFingerprints.includes(embeddedFingerprint)) {
+    throw new Error(`receipt signer ${embeddedFingerprint} does not match trusted key ${trustedFingerprints.join(', ')}`)
   }
+  const trustedPublicKey = trustedPublicKeys[trustedFingerprints.indexOf(embeddedFingerprint)]
   const jsonBytes = await readFile(jsonPath)
   const signature = (await readFile(join(dir, receipt.evidence.signatureFile), 'utf8')).trim()
   if (!verifyBytes(jsonBytes, trustedPublicKey, signature)) throw new Error('receipt signature does not match')
   const markdown = await readFile(join(dir, `${receipt.sessionId}.md`), 'utf8')
-  const currentMarkdown = renderMarkdown(receipt)
-  const legacyMarkdown = !('analysisProfile' in receipt.analyzers) ? renderLegacyMarkdown(receipt) : null
-  if (markdown !== currentMarkdown && markdown !== legacyMarkdown) throw new Error('Markdown receipt does not match the signed JSON')
+  // Every rendering this exact signed JSON could legitimately have produced.
+  // Rewording a disclosure must not invalidate receipts already on disk, so
+  // each superseded wording stays reproducible for verification only.
+  const accepted = [
+    renderMarkdown(receipt),
+    'analysisProfile' in receipt.analyzers ? renderPriorProfileMarkdown(receipt) : renderLegacyMarkdown(receipt),
+  ]
+  if (!accepted.includes(markdown)) throw new Error('Markdown receipt does not match the signed JSON')
   if (sha256(markdown) !== receipt.evidence.markdownSha256) throw new Error('Markdown receipt hash does not match')
   if (receipt.evidence.patchFile) {
     const patch = await readFile(join(dir, receipt.evidence.patchFile))

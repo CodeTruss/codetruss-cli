@@ -3,14 +3,114 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.24 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.24)
-and [`@codetruss/cli@0.2.24` on npm](https://www.npmjs.com/package/@codetruss/cli/v/0.2.24).
+The current public release is [v0.2.30 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.30),
+distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
+The npm `latest` tag is still
+[`@codetruss/cli@0.2.24`](https://www.npmjs.com/package/@codetruss/cli/v/0.2.24):
+npm publication is a separate, manually dispatched step, so npm can trail the
+website and the GitHub release.
 Entries explicitly marked `(unpublished)` are retained release candidates that
 were superseded before distribution.
 
 ## Unreleased
 
 No unreleased changes.
+
+## 0.2.30 — 2026-08-06
+
+- Publish the 0.2.25 through 0.2.29 release history, which shipped without
+  changelog entries. No CLI behaviour changed. `CHANGELOG.md` is one of the eight
+  published files and is byte-compared against the immutable release archive, so
+  documenting those releases requires a new version rather than an edit in place.
+
+## 0.2.29 — 2026-08-06
+
+- Say plainly that a local run never checks for injection. The coverage
+  analyzer had stayed silent for TypeScript, JavaScript, and Python because the
+  SAST engine supports those languages — a fact about the engine, not about a
+  run that never executes it. Analyzers now receive the non-registry passes in
+  effect, defaulting to none, and a repository holding at least 300 lines that
+  pass would have covered gets one INFO finding naming the classes nobody
+  looked for: SQL injection, command injection, code injection, path traversal,
+  SSRF, open redirect, XSS, and insecure deserialization.
+- Replace the receipt's "Hosted Health scores: N/A" footnote with a "What did
+  not run" section naming SAST, the hosted symbol graph, the scores, and — when
+  no model read the diff — the optional LLM review as detection gaps, and
+  stating that a PASS verdict is not a claim the change is secure.
+- Keep receipts written by 0.2.28 and earlier verifiable. No signed field
+  changed, only the rendering, so each superseded wording stays byte-reproducible
+  for verification.
+
+## 0.2.28 — 2026-08-06
+
+- Let `codetruss setup --yes` finish protecting an ordinary repository instead
+  of exiting 3 with a policy file and no guardrail. Conventional source roots
+  that exist on disk are now adopted unattended, never a repository-wide glob,
+  and the adopted list is printed so the decision stays auditable. With nothing
+  detectable the run still stops and asks.
+- Leave auto-detected verification commands out of the policy on an unattended
+  run instead of aborting, and print how to enable them. A recorded but
+  untrusted command list makes every later review exit 3 with no receipt, so the
+  previous behaviour produced a repository that was configured, hooked, and
+  permanently blocked. Withholding applies only when hooks are being installed;
+  `--hooks none` still records the commands for inspect-then-trust.
+
+## 0.2.27 — 2026-08-06
+
+- Deduplicate the PostToolUse fast scope check per turn. The first notice for a
+  path arrives exactly as before, repeats are silent, and a new path still
+  speaks immediately; a turn that touched one out-of-scope file a dozen times
+  previously emitted a dozen identical warnings.
+- Keep that deduplication fail-soft: when session or turn state cannot be read
+  or written, every warning is emitted as it was before.
+
+## 0.2.26 — 2026-08-06
+
+- Keep the receipt's Task line readable when an agent harness delivers a machine
+  event — a background-task notification or a tool result — on the same prompt
+  channel as human instructions. A human prompt is preserved exactly as written;
+  a structured event is reduced to its event tag and summary. Derivation stays
+  deterministic, so prompt-time turn binding is unaffected.
+- Report credential-shaped placeholders at INFO instead of skipping them in
+  silence, so a deliberate skip is not mistaken for a scanner that detects
+  nothing. Only values that announce themselves as fake qualify; runtime
+  credential references such as `process.env`, `{{...}}`, and `ENV[]` stay
+  silent, because that is how a credential is supposed to be written.
+
+## 0.2.25 — 2026-08-06
+
+- Stop an immaterial index-coverage gap from failing a receipt. When the index
+  measurably covered at least 95% of its analyzable input, the remaining
+  limitations — an oversized lockfile, an unreadable file — are reported as
+  review-level context instead of incomplete evidence. Larger losses, and a
+  truncated file walk, still fail closed.
+- Accept a set of pinned signers. `signing.publicKeys` holds one key per
+  developer, `codetruss verify-policy trust-key` appends the local key to it,
+  and receipt verification accepts any trusted signer, so a teammate signs as
+  themselves instead of sharing a private key and destroying attribution.
+- Report the verification commands `codetruss init` detected and state that they
+  are not trusted until approved. Without that notice the next `review` exits 3
+  with no receipt at all.
+- Stop reporting test and seed credentials as HIGH: Go, Python, and Ruby test
+  file conventions are recognized, and a database seed script gets its own
+  MEDIUM finding about the seed path reaching a production database rather than
+  a rotate-immediately instruction.
+- Stop reporting prose as a credential. Values carrying internal whitespace
+  under a credential-shaped key (validation messages, translations, UI labels),
+  SCREAMING_SNAKE enum members, `{{...}}` templates, and environment reads are
+  no longer leaks.
+- Exclude minified and bundled assets by mean line width rather than filename,
+  and report the excluded volume in KB as well as LOC, since packed output
+  understates its size in lines. Excluding a file no longer manufactures dead
+  code for the files it imports.
+- Recognize more convention-loaded entry points as reachable: Pages Router
+  routes, Storybook stories, tooling dotfiles, and `package.json` script targets
+  are no longer reported as orphaned.
+- Suppress the duplicate "no `.env.example`" nudge when a committed runtime
+  `.env` already produces the structure analyzer's version of that finding, and
+  reword the per-language security caveat from "surface-only" to "coverage is
+  partial", since pattern and dataflow rules do apply beyond TypeScript,
+  JavaScript, and Python.
 
 ## 0.2.24 — 2026-07-15
 

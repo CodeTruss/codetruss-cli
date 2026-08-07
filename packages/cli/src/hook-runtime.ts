@@ -365,7 +365,11 @@ function frozenConfig(config: CliConfig): CliConfig {
       ...(config.llm.model ? { model: config.llm.model } : {}),
       maxDiffBytes: config.llm.maxDiffBytes,
     },
-    signing: { ...(config.signing.publicKey ? { publicKey: config.signing.publicKey } : {}) },
+    signing: {
+      ...(config.signing.publicKey ? { publicKey: config.signing.publicKey } : {}),
+      // Freeze the whole trusted set: a repository may pin one key per developer.
+      publicKeys: [...config.signing.publicKeys],
+    },
     sync: { url: config.sync.url },
   }
 }
@@ -390,6 +394,7 @@ function validateHookTurnContext(value: unknown): HookTurnContext {
     || (config.llm.provider !== undefined && !['anthropic', 'openai', 'claude', 'codex'].includes(config.llm.provider))
     || (config.llm.model !== undefined && typeof config.llm.model !== 'string')
     || !config.signing || (config.signing.publicKey !== undefined && typeof config.signing.publicKey !== 'string')
+    || !isStringArray(config.signing.publicKeys)
     || !config.sync || typeof config.sync.url !== 'string'
     || !isStringArray(context.baselineDirtyFiles)) {
     throw new Error('hook turn context is invalid')
@@ -1214,9 +1219,30 @@ function inputTurnId(input: HookInput): string | undefined {
   return turnId
 }
 
+/**
+ * The receipt's Task line is its primary human-readable field, and the first
+ * thing a reviewer (or a client receiving the receipt) reads. Agent harnesses
+ * deliver machine events — background-task notifications, tool results — on the
+ * same prompt channel as human instructions, and reproducing that XML verbatim
+ * leaves the headline field unreadable. Keep human prompts exactly as written;
+ * reduce a structured system event to its summary, labelled by its event tag.
+ *
+ * Deterministic: capture and prompt-time verification derive the task the same
+ * way, so turn binding is unaffected.
+ */
+function readableTask(prompt: string): string {
+  const trimmed = prompt.trim()
+  if (!trimmed.startsWith('<')) return trimmed
+  const tag = /^<([A-Za-z][\w-]*)/.exec(trimmed)?.[1]
+  if (!tag) return trimmed
+  const summary = /<summary>([\s\S]*?)<\/summary>/i.exec(trimmed)?.[1]?.replace(/\s+/g, ' ').trim()
+  return summary ? `[${tag}] ${summary}` : `[${tag}]`
+}
+
 function inputTask(input: HookInput): string | undefined {
   const prompt = asNonEmptyString(input.prompt)
-  return prompt?.slice(0, MAX_TASK_CHARS)
+  if (!prompt) return undefined
+  return asNonEmptyString(readableTask(prompt).slice(0, MAX_TASK_CHARS))
 }
 
 type NamedLockName = 'capture.lock' | 'stop.lock' | 'migration.lock'
@@ -1507,11 +1533,48 @@ function normalizeHookPath(root: string, cwd: string | undefined, inputPath: str
   return { path: candidate }
 }
 
-function fastPathFeedback(
+/**
+ * Warnings already surfaced during this turn. An always-on guardrail earns its
+ * place by being felt, not heard: repeating an identical notice on every tool
+ * call is what makes a developer uninstall it. Fail-soft by design — if turn
+ * state cannot be read or written, every warning is emitted as before, because
+ * a missed warning is worse than a duplicated one.
+ */
+async function alreadyNotified(
   root: string,
+  surface: AgentHookSurface,
+  input: HookInput,
+  warnings: string[],
+): Promise<{ fresh: string[]; persist?: () => Promise<void> }> {
+  const sessionId = asNonEmptyString(input.session_id)
+  if (!sessionId) return { fresh: warnings }
+  try {
+    const prepared = await gitStateRoot(root, surface, sessionId)
+    if (prepared.legacyBlockReason) return { fresh: warnings }
+    const sessionDir = sessionStateDir(prepared.base, surface, sessionId)
+    const { turnDir } = await readStopSelector(sessionDir)
+    const file = join(turnDir, 'fast-path-notified.json')
+    const seen = (await readBoundedRegularJson<unknown>(file, MAX_SELECTOR_BYTES)) as unknown
+    const previous = isStringArray(seen) ? seen : []
+    const fresh = warnings.filter((warning) => !previous.includes(warning))
+    if (fresh.length === 0) return { fresh }
+    return {
+      fresh,
+      persist: async () => {
+        await writePrivateJson(file, [...previous, ...fresh].slice(-200))
+      },
+    }
+  } catch {
+    return { fresh: warnings }
+  }
+}
+
+async function fastPathFeedback(
+  root: string,
+  surface: AgentHookSurface,
   input: HookInput,
   config: CliConfig,
-): HookOutput | undefined {
+): Promise<HookOutput | undefined> {
   const cwd = asNonEmptyString(input.cwd)
   const rawPaths = [
     ...stringsAtKnownPathKeys(input.tool_input),
@@ -1533,7 +1596,10 @@ function fastPathFeedback(
   }
   for (const path of outside) warnings.push(`${path}: resolves outside the repository`)
   if (warnings.length === 0) return undefined
-  return postToolFeedback(`CodeTruss fast scope check:\n${warnings.map((warning) => `- ${warning}`).join('\n')}\nA full analyzer receipt will run once when this turn stops.`)
+  const { fresh, persist } = await alreadyNotified(root, surface, input, warnings)
+  if (fresh.length === 0) return undefined
+  await persist?.().catch(() => undefined)
+  return postToolFeedback(`CodeTruss fast scope check:\n${fresh.map((warning) => `- ${warning}`).join('\n')}\nA full analyzer receipt will run once when this turn stops.`)
 }
 
 export function hookReviewEnvironment(
@@ -2046,7 +2112,7 @@ export async function handleAgentHook(
 ): Promise<HookOutput | undefined> {
   const event = hookEvent(input)
   if (event === 'UserPromptSubmit') return capturePromptBaseline(root, surface, input, config, dependencies)
-  if (event === 'PostToolUse') return fastPathFeedback(root, input, config)
+  if (event === 'PostToolUse') return fastPathFeedback(root, surface, input, config)
   if (event === 'Stop') {
     try {
       return await reviewAtStop(root, surface, input, dependencies)

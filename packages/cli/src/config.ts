@@ -9,6 +9,26 @@ export const CONFIG_FILE = '.codetruss.yml'
 export const PRODUCTION_SYNC_ORIGIN = 'https://codetruss.com'
 export const DEV_SYNC_ORIGIN_ENV = 'CODETRUSS_DEV_SYNC_ORIGIN'
 export const APPROVED_RECEIPT_DIR = '.codetruss/receipts'
+/**
+ * Normalize the signing pin into a set. Accepts a single `publicKey` (what
+ * `init` writes) and/or a `publicKeys` list, so a team can add each developer's
+ * key without any one of them being blocked. Duplicates collapse; order is
+ * preserved so `publicKey` stays stable for existing single-signer configs.
+ */
+function signingPins(signing: Record<string, unknown>): { publicKey?: string; publicKeys: string[] } {
+  const raw: unknown[] = [
+    signing.publicKey,
+    ...(Array.isArray(signing.publicKeys) ? signing.publicKeys : []),
+  ]
+  const publicKeys: string[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !entry.trim()) continue
+    const normalized = normalizePublicKey(entry)
+    if (!publicKeys.includes(normalized)) publicKeys.push(normalized)
+  }
+  return { publicKey: publicKeys[0], publicKeys }
+}
+
 export const DEFAULT_CONFIG: CliConfig = {
   version: 1,
   allow: [],
@@ -16,13 +36,20 @@ export const DEFAULT_CONFIG: CliConfig = {
   verify: [],
   receipts: { dir: APPROVED_RECEIPT_DIR },
   llm: { maxDiffBytes: 200_000 },
-  signing: {},
+  signing: { publicKeys: [] },
   sync: { url: PRODUCTION_SYNC_ORIGIN },
 }
 
 export interface InitializeOptions {
   allow?: string[]
   deny?: string[]
+  /**
+   * Override the auto-detected verification commands. Unattended setup passes
+   * an empty list so a repository is never configured with commands it has not
+   * been given permission to run — a review would otherwise refuse to produce
+   * any receipt at all.
+   */
+  verify?: string[]
 }
 
 function objectValue(value: unknown, key: string): Record<string, unknown> {
@@ -86,11 +113,7 @@ export async function loadConfig(root: string): Promise<CliConfig> {
       // only when --llm is actually requested.
       maxDiffBytes: typeof maxDiffBytes === 'number' && maxDiffBytes > 0 ? maxDiffBytes : DEFAULT_CONFIG.llm.maxDiffBytes,
     },
-    signing: {
-      publicKey: typeof signing.publicKey === 'string' && signing.publicKey.trim()
-        ? normalizePublicKey(signing.publicKey)
-        : undefined,
-    },
+    signing: signingPins(signing),
     // This value is an application invariant, never repository configuration.
     sync: { url: PRODUCTION_SYNC_ORIGIN },
   }
@@ -160,7 +183,7 @@ export async function initialize(root: string, force = false, options: Initializ
   if (!force) {
     try { await access(path); throw new Error(`${CONFIG_FILE} already exists; pass --force to replace it`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
-  const detected = await detectVerify(root)
+  const detected = options.verify ?? (await detectVerify(root))
   const key = await loadSigningKey(true)
   const value = {
     version: DEFAULT_CONFIG.version,
@@ -227,4 +250,39 @@ async function detectVerify(root: string): Promise<string[]> {
   if ((await exists('Cargo.toml')) && await available('cargo')) return ['cargo test']
   if (((await exists('pyproject.toml')) || (await exists('requirements.txt'))) && await available('pytest')) return ['pytest']
   return []
+}
+
+/**
+ * Append the local signing key to the repository's trusted set so a teammate
+ * can produce receipts under their OWN identity. The alternative the old error
+ * implied — sharing a private key — would destroy per-signer attribution, which
+ * is the entire point of signing the receipt.
+ */
+export async function trustLocalSigningKey(
+  root: string,
+): Promise<{ status: 'added' | 'already-trusted'; fingerprint: string; total: number }> {
+  const key = await loadSigningKey(true)
+  const path = join(root, CONFIG_FILE)
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    throw new Error(`no ${CONFIG_FILE} in this repository; run codetruss init first`)
+  }
+  const parsed = parse(text)
+  const document = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {}
+  const existing = signingPins(objectValue(document.signing, 'signing'))
+  const mine = normalizePublicKey(key.publicKey)
+  if (existing.publicKeys.includes(mine)) {
+    return { status: 'already-trusted', fingerprint: key.fingerprint, total: existing.publicKeys.length }
+  }
+  const publicKeys = [...existing.publicKeys, mine]
+  document.signing = { publicKeys }
+  // Preserve the leading header comment; `stringify` would otherwise drop it.
+  const header = text.startsWith('#') ? `${text.slice(0, text.indexOf('\n') + 1)}` : ''
+  await writeFile(path, `${header}${stringify(document)}`, 'utf8')
+  return { status: 'added', fingerprint: key.fingerprint, total: publicKeys.length }
 }
