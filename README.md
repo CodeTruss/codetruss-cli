@@ -124,10 +124,12 @@ codetruss setup [--allow GLOB] [--deny GLOB] [--hooks all|pre-commit|claude|code
                 [--trust-verify] [--yes]
 codetruss init [--allow GLOB] [--deny GLOB] [--force]
 codetruss verify [id|latest]
+codetruss verify-receipt <receipt.json|dir> [--public-key FILE]
 codetruss sync [id|latest] [--dry-run]
 codetruss auth login|status|logout
 codetruss verify-policy [status|trust|trust-key|revoke]
 codetruss hooks install|status|doctor|uninstall [pre-commit|claude|codex|all]
+codetruss grammars list|status|install|uninstall [python]
 ```
 
 `verify-policy status`, `trust`, and `revoke` govern whether the repository's
@@ -184,7 +186,7 @@ be rechecked later with `codetruss verify latest`. Every receipt states the
 detection gaps in its own body, so a `PASS` is never mistaken for a security
 clearance. Abridged from a real 0.2.36 run, so it prints the `local-registry-v2`
 profile and its thirteen-analyzer wording. A run on this release prints
-`local-registry-v3` and fifteen; 0.2.39 keeps the v2 renderer frozen so the
+`local-registry-v4` and fifteen. Every superseded renderer stays frozen, so the
 receipt below still verifies byte-for-byte as signed:
 
 ```markdown
