@@ -175,7 +175,10 @@ The verdict is not a confidence score.
 Receipts are written as Markdown and JSON next to hashed patch evidence, and can
 be rechecked later with `codetruss verify latest`. Every receipt states the
 detection gaps in its own body, so a `PASS` is never mistaken for a security
-clearance. Abridged from a real 0.2.36 run:
+clearance. Abridged from a real 0.2.36 run, so it prints the `local-registry-v2`
+profile and its thirteen-analyzer wording. A run on this release prints
+`local-registry-v3` and fifteen; 0.2.39 keeps the v2 renderer frozen so the
+receipt below still verifies byte-for-byte as signed:
 
 ```markdown
 # CodeTruss receipt — REVIEW_REQUIRED
