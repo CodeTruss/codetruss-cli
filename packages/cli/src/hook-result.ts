@@ -19,6 +19,12 @@ export interface InternalHookResult {
   verdict: 'PASS' | 'REVIEW_REQUIRED' | 'FAILED'
   receiptPath: string
   reasons: string[]
+  /**
+   * The highest-severity finding's suggested change, carried separately from
+   * `reasons` so the display cap on reasons can never drop it. A suggestion is
+   * not a reason for the verdict; it is the next action the agent can take.
+   */
+  suggestion?: string
 }
 
 function present(value: string | undefined): boolean {
@@ -109,6 +115,10 @@ export async function writeInternalHookResult(
   const reasons = result.reasons
     .slice(0, MAX_RESULT_REASONS)
     .map((reason) => reason.slice(0, MAX_RESULT_REASON_CHARS))
+  if (result.suggestion !== undefined && typeof result.suggestion !== 'string') {
+    throw new Error('CodeTruss hook result suggestion must be a string')
+  }
+  const suggestion = result.suggestion?.slice(0, MAX_RESULT_REASON_CHARS)
 
   const value = `${JSON.stringify({
     version: 1,
@@ -116,6 +126,7 @@ export async function writeInternalHookResult(
     verdict: result.verdict,
     receiptPath: result.receiptPath,
     reasons,
+    ...(suggestion ? { suggestion } : {}),
   })}\n`
   if (Buffer.byteLength(value) > MAX_RESULT_BYTES) {
     throw new Error(`CodeTruss hook result exceeds ${MAX_RESULT_BYTES} bytes`)

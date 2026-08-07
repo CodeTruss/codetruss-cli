@@ -1,7 +1,23 @@
 import type { AnalyzerFinding, AnalyzerPass, RepoIndex, Scores } from '@codetruss/analyzer-engine'
 
 export type Verdict = 'PASS' | 'REVIEW_REQUIRED' | 'FAILED'
-export type ScopeClassification = 'allowed' | 'denied' | 'unexpected'
+/**
+ * `inferred` is in scope on weaker evidence than `allowed`: the repository
+ * approved nothing that covers the path, but this turn's own task text and
+ * changed files did. It is always disclosed on the receipt, never silent.
+ */
+export type ScopeClassification = 'allowed' | 'denied' | 'unexpected' | 'inferred'
+/** In descending trust order; see packages/cli/src/scope-inference.ts. */
+export const INFERRED_SCOPE_BASES = ['task-reference', 'working-set', 'sibling-test'] as const
+export type InferredScopeBasis = typeof INFERRED_SCOPE_BASES[number]
+
+export interface InferredScopeRoot {
+  /** Repository-relative directory, or a single file for `sibling-test`. */
+  root: string
+  basis: InferredScopeBasis
+  /** What this allowance was read from: the task phrase, or the changed paths. */
+  evidence: string[]
+}
 export const RECEIPT_INVOCATION_KINDS = ['manual_run', 'manual_review', 'pre_commit', 'agent_hook'] as const
 export type ReceiptInvocationKind = typeof RECEIPT_INVOCATION_KINDS[number]
 export const AGENT_HOOK_SURFACES = ['claude', 'codex'] as const
@@ -13,13 +29,32 @@ export const CONFIG_LLM_PROVIDERS = [...LLM_PROVIDERS, 'codex'] as const
 export type ConfiguredLlmProvider = typeof CONFIG_LLM_PROVIDERS[number]
 export const MAX_LLM_DIFF_BYTES = 2_000_000
 
-/** Honest local-analysis contract: registry passes run locally; hosted-only passes and scores do not. */
+/**
+ * Honest local-analysis contract: which passes ran on this machine, which did
+ * not, and whether scores may be inferred.
+ *
+ * `local-registry-v2` supersedes `local-registry-v1`, in which SAST was omitted
+ * entirely. A reduced security pass now runs locally, so `omittedPasses` no
+ * longer names it and `localPasses` names what took its place. The id is bumped
+ * rather than the tuple loosened: this shape is inside signed receipts, and
+ * every v1 receipt must keep verifying byte-for-byte against the wording it was
+ * signed with.
+ */
 export const LOCAL_ANALYSIS_PROFILE = {
-  id: 'local-registry-v1',
-  omittedPasses: ['graph', 'sast'],
+  id: 'local-registry-v2',
+  omittedPasses: ['graph'],
+  localPasses: ['local-sast'],
   scoreStatus: 'not-computed',
 } as const
 export type LocalAnalysisProfile = typeof LOCAL_ANALYSIS_PROFILE
+
+/** The v1 shape, retained so receipts signed by CLI ≤ 0.2.34 still parse. */
+export interface LegacyLocalAnalysisProfileV1 {
+  id: 'local-registry-v1'
+  omittedPasses: readonly ['graph', 'sast']
+  scoreStatus: 'not-computed'
+}
+export type AnyLocalAnalysisProfile = LocalAnalysisProfile | LegacyLocalAnalysisProfileV1
 
 export interface CliConfig {
   version: 1
@@ -92,7 +127,7 @@ interface AnalyzerReceiptEvidence {
 export type AnalyzerReceipt = AnalyzerReceiptEvidence & (
   | {
       /** Current local receipts never infer hosted Health scores from an incomplete pass set. */
-      analysisProfile: LocalAnalysisProfile
+      analysisProfile: AnyLocalAnalysisProfile
       scores?: never
       baselineScores?: never
     }
@@ -130,7 +165,13 @@ export interface Receipt {
   startDirty: boolean
   startDirtyFiles: string[]
   agent?: { command: string[]; exitCode: number; durationMs: number; startError?: string }
-  scope: { allow: string[]; deny: string[] }
+  /**
+   * `allow`/`deny` are the approved policy. `inferred` records the weaker,
+   * turn-only allowances that covered paths the policy did not, and is present
+   * only when this turn actually used one — which is what keeps receipts signed
+   * before inference existed rendering, and verifying, byte for byte.
+   */
+  scope: { allow: string[]; deny: string[]; inferred?: InferredScopeRoot[] }
   files: ChangedFile[]
   diff: { sha256: string; bytes: number; totalBytes?: number; truncated: boolean }
   analyzers: AnalyzerReceipt

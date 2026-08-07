@@ -133,6 +133,43 @@ export interface DetectableFile {
   content: string | null
 }
 
+/**
+ * The one Node package manager this repository actually uses, or undefined when
+ * the evidence does not name exactly one.
+ *
+ * Deliberately stricter than detectPackageManagers(): that function reports
+ * everything it sees for display, while a fix suggestion may only name a
+ * manager the repository itself declares. Order matters — an explicit
+ * `packageManager` field outranks a lockfile, and two competing lockfiles
+ * resolve to nothing rather than to whichever was checked first.
+ */
+export function nodePackageManager(files: DetectableFile[]): 'pnpm' | 'yarn' | 'npm' | 'bun' | undefined {
+  const paths = files.map((f) => f.path)
+  const has = (name: string) => paths.includes(name)
+  const packageJson = files.find((f) => f.path === 'package.json')
+  if (!packageJson) return undefined
+
+  const declared = packageJson.content?.match(/"packageManager"\s*:\s*"([a-z]+)@/)?.[1]
+  if (declared === 'pnpm' || declared === 'yarn' || declared === 'npm' || declared === 'bun') return declared
+
+  const fromLockfiles = ([
+    ['pnpm', 'pnpm-lock.yaml'],
+    ['yarn', 'yarn.lock'],
+    ['npm', 'package-lock.json'],
+    ['bun', 'bun.lock'],
+    ['bun', 'bun.lockb'],
+  ] as const).filter(([, lockfile]) => has(lockfile)).map(([manager]) => manager)
+  const uniqueLockfileManagers = [...new Set(fromLockfiles)]
+  if (uniqueLockfileManagers.length === 1) return uniqueLockfileManagers[0]
+  if (uniqueLockfileManagers.length > 1) return undefined
+
+  // No lockfile at all: only a manager-specific config file is evidence.
+  if (has('pnpm-workspace.yaml')) return 'pnpm'
+  if (has('.yarnrc.yml') || has('.yarnrc')) return 'yarn'
+  if (has('bunfig.toml')) return 'bun'
+  return undefined
+}
+
 export function detectPackageManagers(files: DetectableFile[]): string[] {
   const paths = files.map((f) => f.path)
   const managers: string[] = []

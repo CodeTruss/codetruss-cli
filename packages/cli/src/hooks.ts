@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
-import { access, chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
+import { access, chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, delimiter, dirname, isAbsolute, join, parse as parsePath, resolve } from 'node:path'
 import { loadConfig } from './config.js'
 import { runGitText } from './git-process.js'
+import { CLI_VERSION } from './version.js'
 import { verifyCommandTrustStatus } from './verify-trust.js'
 
 type HookHandler = { type?: string; command?: string; args?: string[]; [key: string]: unknown }
@@ -535,6 +536,58 @@ async function executablePath(root: string): Promise<string | undefined> {
   return undefined
 }
 
+/**
+ * Version of the @codetruss/cli install that owns `executable`, read from its
+ * package manifest. Never executes the binary: resolving a shadowing install
+ * must not run whatever happens to be first on PATH.
+ */
+export async function installedCliVersion(executable: string): Promise<string | undefined> {
+  let cursor: string
+  try {
+    cursor = dirname(await realpath(executable))
+  } catch {
+    return undefined
+  }
+  const { root } = parsePath(cursor)
+  while (true) {
+    try {
+      const manifest = JSON.parse(await readFile(join(cursor, 'package.json'), 'utf8')) as {
+        name?: unknown
+        version?: unknown
+      }
+      if (manifest.name === '@codetruss/cli' && typeof manifest.version === 'string') return manifest.version
+    } catch {
+      // no manifest here, or unreadable — keep walking up
+    }
+    if (cursor === root) return undefined
+    const parent = dirname(cursor)
+    if (parent === cursor) return undefined
+    cursor = parent
+  }
+}
+
+/**
+ * The hooks invoke `codetruss` by name, so they run whatever PATH resolves —
+ * which is not always what was just installed. A stale binary earlier in PATH
+ * silently shadows the new one, and the installer's own "Ready" message used to
+ * hide it. Reported as a warning: the hooks still work, they just are not this
+ * version. Determined by manifest version, so a repository-local install of the
+ * same version is not mistaken for a shadow.
+ */
+async function inspectExecutableShadow(
+  executable: string,
+  add: (check: HookDoctorCheck) => void,
+): Promise<void> {
+  const resolved = await installedCliVersion(executable)
+  if (!resolved || resolved === CLI_VERSION) return
+  add({
+    level: 'warning',
+    target: 'runtime',
+    message: `installed hooks resolve codetruss ${resolved}, but this CLI is ${CLI_VERSION}; put the intended install first on PATH or remove the older one`,
+    path: executable,
+  })
+}
+
 function exactAgentHandler(handler: HookHandler, expected: HookHandler): boolean {
   return handler.type === expected.type
     && handler.command === expected.command
@@ -697,8 +750,10 @@ export async function inspectHookDoctor(root: string, target: string): Promise<H
     await inspectRunner(root, add)
   }
   const cliPath = await executablePath(root)
-  if (cliPath) add({ level: 'ok', target: 'runtime', message: 'CodeTruss CLI is resolvable by installed hooks', path: cliPath })
-  else add({ level: 'error', target: 'runtime', message: 'CodeTruss CLI is not available locally or on PATH' })
+  if (cliPath) {
+    add({ level: 'ok', target: 'runtime', message: 'CodeTruss CLI is resolvable by installed hooks', path: cliPath })
+    await inspectExecutableShadow(cliPath, add)
+  } else add({ level: 'error', target: 'runtime', message: 'CodeTruss CLI is not available locally or on PATH' })
   for (const name of targets) {
     if (name === 'pre-commit') await inspectPreCommit(root, add)
     else {

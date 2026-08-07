@@ -1,5 +1,7 @@
 import { readFile } from 'fs/promises'
 import { join } from 'path'
+import { nodePackageManager } from './detect'
+import { lockfileRefreshFix } from './fixes'
 import type { Analyzer, AnalyzerFinding } from './types'
 
 /**
@@ -57,6 +59,7 @@ export const dependencyAnalyzer: Analyzer = {
           title: 'No lockfile committed',
           description: 'package.json exists but no lockfile is committed. Builds are not reproducible and supply-chain drift is invisible.',
           suggestion: 'Commit the lockfile for your package manager and enforce frozen-lockfile installs in CI.',
+          fix: lockfileRefreshFix(nodePackageManager(index.files)),
           impactScore: isLibrary ? 55 : 75,
           effort: 'low',
         })

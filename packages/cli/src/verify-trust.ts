@@ -1,10 +1,33 @@
+import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { sha256 } from './signing.js'
 
 const TRUST_VERSION = 1 as const
-export const DEFAULT_VERIFY_TRUST_FILE = join(homedir(), '.config', 'codetruss', 'verify-command-trust.json')
+const TRUST_FILE_NAME = 'verify-command-trust.json'
+
+/**
+ * Where the user-local trust store lives. Aligned with cliAuthFilePath(): both
+ * are user config under the same root, and honouring XDG_CONFIG_HOME in one but
+ * not the other silently split a single user's CodeTruss state across two
+ * directories.
+ *
+ * Migration: an existing store at the legacy `~/.config` path keeps being used
+ * even once XDG_CONFIG_HOME is set, so setting that variable never orphans
+ * approvals someone already made.
+ */
+export function verifyTrustFilePath(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.XDG_CONFIG_HOME?.trim()
+  if (configured && !isAbsolute(configured)) {
+    throw new Error('XDG_CONFIG_HOME must be an absolute user config path')
+  }
+  const legacy = join(homedir(), '.config', 'codetruss', TRUST_FILE_NAME)
+  if (!configured) return legacy
+  const preferred = join(configured, 'codetruss', TRUST_FILE_NAME)
+  if (existsSync(preferred) || !existsSync(legacy)) return preferred
+  return legacy
+}
 
 interface VerifyTrustStore {
   version: typeof TRUST_VERSION
@@ -84,7 +107,7 @@ async function writeStore(path: string, store: VerifyTrustStore): Promise<void> 
 export async function verifyCommandTrustStatus(
   root: string,
   commands: string[],
-  trustFile = DEFAULT_VERIFY_TRUST_FILE,
+  trustFile = verifyTrustFilePath(),
 ): Promise<VerifyCommandTrustStatus> {
   const hash = await verifyCommandTrustHash(root, commands)
   const store = await readStore(trustFile)
@@ -95,7 +118,7 @@ export async function verifyCommandTrustStatus(
 export async function trustVerifyCommands(
   root: string,
   commands: string[],
-  trustFile = DEFAULT_VERIFY_TRUST_FILE,
+  trustFile = verifyTrustFilePath(),
   now = new Date(),
 ): Promise<VerifyCommandTrustStatus> {
   const hash = await verifyCommandTrustHash(root, commands)
@@ -108,7 +131,7 @@ export async function trustVerifyCommands(
 export async function revokeVerifyCommands(
   root: string,
   commands: string[],
-  trustFile = DEFAULT_VERIFY_TRUST_FILE,
+  trustFile = verifyTrustFilePath(),
 ): Promise<VerifyCommandTrustStatus> {
   const hash = await verifyCommandTrustHash(root, commands)
   const store = await readStore(trustFile)

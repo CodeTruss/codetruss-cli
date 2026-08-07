@@ -2,7 +2,7 @@ import { access, lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import type { Readable, Writable } from 'node:stream'
-import { CONFIG_FILE, initialize, loadConfig } from './config.js'
+import { CONFIG_FILE, detectVerifyCommands, initialize, loadConfig, type VerifyDetection } from './config.js'
 import { inspectHookDoctor, installHooks } from './hooks.js'
 import { ensureLocalEvidenceProtected } from './local-evidence.js'
 import { trustVerifyCommands, verifyCommandTrustStatus } from './verify-trust.js'
@@ -26,6 +26,15 @@ const SUGGESTED_SCOPE_DIRECTORIES = [
 
 const HOOK_TARGETS = ['all', 'pre-commit', 'claude', 'codex', 'none'] as const
 type SetupHookTarget = typeof HOOK_TARGETS[number]
+
+/**
+ * The files setup itself writes. Left out of the allow list, setup's own
+ * footprint made every user's FIRST commit REVIEW_REQUIRED for "changed outside
+ * approved scope" — CodeTruss flagging CodeTruss, on the one run where the tool
+ * has to earn trust. These paths are in scope by default; `.codetruss.yml`
+ * remains a sensitive policy surface, which is the point of reviewing it.
+ */
+export const SETUP_FOOTPRINT_GLOBS = ['.codetruss.yml', '.claude/**', '.codex/**', '.githooks/**'] as const
 
 export interface GuidedSetupOptions {
   allow?: string[]
@@ -133,6 +142,60 @@ async function resolveHookTarget(
   return hookTarget(answer || 'all')!
 }
 
+function detectionLines(detection: VerifyDetection, withheld: boolean): string[] {
+  const list = detection.candidates.map((entry) => `  - ${entry}\n`)
+  if (detection.commands.length) {
+    return [
+      'Detected repository verification commands but did NOT record them:\n',
+      ...list,
+      ...(withheld
+        ? ['They execute repository code, and an unattended run must not approve that on your behalf.\n']
+        : []),
+      `To enable them: add them under verify: in ${CONFIG_FILE}, then run codetruss verify-policy trust\n`,
+    ]
+  }
+  if (detection.blocker === 'missing-lockfile') {
+    return [
+      'Found package.json scripts but recorded no verification commands:\n',
+      ...list,
+      'No lockfile is committed, so CodeTruss cannot tell which package manager runs them.\n',
+      `To enable them: commit a lockfile and rerun setup, or add the exact commands under verify: in ${CONFIG_FILE}, then run codetruss verify-policy trust\n`,
+    ]
+  }
+  if (detection.blocker === 'package-manager-unavailable') {
+    return [
+      'Detected repository verification commands but their package manager is not on PATH:\n',
+      ...list,
+      `To enable them: install the package manager and rerun setup, or add the exact commands under verify: in ${CONFIG_FILE}, then run codetruss verify-policy trust\n`,
+    ]
+  }
+  return [`No repository verification commands were detected; add trusted checks to verify: in ${CONFIG_FILE} when ready.\n`]
+}
+
+function withSetupFootprint(globs: string[]): string[] {
+  return [...globs, ...SETUP_FOOTPRINT_GLOBS.filter((glob) => !globs.includes(glob))]
+}
+
+/**
+ * Does a stored allow list already express this request? Setup appends its own
+ * footprint, so the saved policy is the request plus those globs — and a policy
+ * saved by an earlier CLI carries the request alone. Both are the same ask, and
+ * a rerun of the identical command must stay idempotent rather than error.
+ */
+function allowPolicyMatches(requested: string[], existing: string[]): boolean {
+  const stored = JSON.stringify(existing)
+  return stored === JSON.stringify(requested) || stored === JSON.stringify(withSetupFootprint(requested))
+}
+
+/** Report what detection actually found, including what setup chose to withhold. */
+async function writeVerifyDetectionTruth(
+  root: string,
+  withheld: boolean,
+  write: (value: string) => void,
+): Promise<void> {
+  for (const line of detectionLines(await detectVerifyCommands(root), withheld)) write(line)
+}
+
 /**
  * One guided, resumable setup path. Repository verification commands are
  * displayed before their exact path-bound fingerprint is trusted. `--yes`
@@ -146,6 +209,7 @@ export async function guidedSetup(root: string, options: GuidedSetupOptions = {}
   const deny = normalizeGlobs(options.deny, 'deny')
   const requestedHooks = hookTarget(options.hooks)
   const yes = options.yes === true
+  let withheldVerify = false
   let readline: ReturnType<typeof createInterface> | undefined
   let answers: AsyncIterableIterator<string> | undefined
   const ask = options.ask ?? (async (question: string) => {
@@ -166,14 +230,14 @@ export async function guidedSetup(root: string, options: GuidedSetupOptions = {}
     const hasConfig = await exists(configPath)
     if (hasConfig) {
       const existing = await loadConfig(root)
-      const allowChanged = allow !== undefined && JSON.stringify(allow) !== JSON.stringify(existing.allow)
+      const allowChanged = allow !== undefined && !allowPolicyMatches(allow, existing.allow)
       const denyChanged = deny !== undefined && JSON.stringify(deny) !== JSON.stringify(existing.deny)
       if (allowChanged || denyChanged) {
         throw new Error(`${CONFIG_FILE} already exists with a different ${allowChanged ? 'allow' : 'deny'} policy; edit and review it directly, then rerun setup`)
       }
       write(`${allow !== undefined || deny !== undefined ? 'Requested policy matches' : 'Using existing'} ${CONFIG_FILE}.\n`)
     } else {
-      const selectedAllow = await resolveAllowGlobs(root, allow, yes, ask, write)
+      const selectedAllow = withSetupFootprint(await resolveAllowGlobs(root, allow, yes, ask, write))
       const selectedDeny = deny ?? []
       // Unattended setup must never record commands it has no permission to
       // run: an untrusted verify list makes every later review exit 3 with no
@@ -181,13 +245,14 @@ export async function guidedSetup(root: string, options: GuidedSetupOptions = {}
       // Only when hooks will actually be installed: with --hooks none there is
       // nothing to block, and recording untrusted commands for later inspection
       // is the point of that flow.
-      const withheldVerify = yes && !options.trustVerify && requestedHooks !== 'none'
+      withheldVerify = yes && !options.trustVerify && requestedHooks !== 'none'
       const path = await initialize(root, false, {
         allow: selectedAllow,
         deny: selectedDeny,
         ...(withheldVerify ? { verify: [] } : {}),
       })
       write(`Saved policy: ${path}\n`)
+      write(`Commit ${CONFIG_FILE} so this policy is reviewable.\n`)
     }
 
     const config = await loadConfig(root)
@@ -202,7 +267,11 @@ export async function guidedSetup(root: string, options: GuidedSetupOptions = {}
       for (const command of config.verify) write(`  - ${command}\n`)
       write('These commands execute repository code, each in its own isolated snapshot.\n')
     } else {
-      write('No repository verification commands were detected; add trusted checks to verify: in .codetruss.yml when ready.\n')
+      // "No commands were detected" was a lie in the two most common cases: an
+      // unattended run deliberately withheld them, or detection found the
+      // scripts and could not resolve a package manager. Report what was
+      // actually found and what clears it.
+      await writeVerifyDetectionTruth(root, withheldVerify, write)
     }
 
     const selectedHooks = await resolveHookTarget(requestedHooks, yes, ask)

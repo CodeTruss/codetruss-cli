@@ -257,6 +257,36 @@ export const coverageAnalyzer: Analyzer = {
       ]
     }
 
+    // The pass ran, but with a reduced rule set. Naming only what it covered
+    // would let a reader infer the rest was checked and clean — the same
+    // inference the block above exists to prevent, one level down.
+    const unchecked = context.sastUncheckedClasses
+    if (context.sast && unchecked && unchecked.length > 0 && coverage.securityLoc >= MIN_ANALYZABLE_LOC) {
+      return [
+        {
+          category: 'SECURITY_HYGIENE',
+          severity: 'INFO',
+          title: 'Security static analysis ran with a reduced rule set',
+          description:
+            `The security pass ran on the ${coverage.securityLoc} lines it covers here, including ` +
+            `taint tracking from untrusted source to SQL execution. It did NOT check ` +
+            `${unchecked.join(', ')}. Those rules need analysis this profile does not perform, so ` +
+            `the absence of a finding in those classes means "not checked", not "clean".`,
+          suggestion:
+            `A hosted SECURITY or FULL_AUDIT scan runs the complete rule pack — every class listed ` +
+            `above — over the same code.`,
+          impactScore: 20,
+          effort: 'low',
+          metadata: {
+            sastPassRan: true,
+            sastUncheckedClasses: [...unchecked],
+            securityLoc: coverage.securityLoc,
+            totalLoc: coverage.totalLoc,
+          },
+        },
+      ]
+    }
+
     if (coverage.securityLimited) {
       const lang =
         coverage.primaryLanguage ?? coverage.structureOnlyLanguages[0] ?? 'this language'

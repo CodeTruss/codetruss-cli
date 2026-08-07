@@ -11,7 +11,10 @@ export function classifyPath(path: string, oldPath: string | undefined, allow: s
   const current = one(path)
   if (!oldPath) return current
   const previous = one(oldPath)
-  const rank: Record<ScopeClassification, number> = { allowed: 0, unexpected: 1, denied: 2 }
+  // `inferred` is never produced here; scope inference runs over the whole
+  // changed set afterwards. The rank still orders it, so a rename that touches
+  // an inferred origin can never be reported as plainly allowed.
+  const rank: Record<ScopeClassification, number> = { allowed: 0, inferred: 1, unexpected: 2, denied: 3 }
   return rank[previous] > rank[current] ? previous : current
 }
 
