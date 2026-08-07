@@ -73,6 +73,14 @@ async function pythonRepo(): Promise<string> {
     '    url = request.args.get("url")',
     '    return requests.get(url).text',
     '',
+    '',
+    '# The DB-API two-step: the cursor is a short local, not a DB-ish name.',
+    'def get_user(conn):',
+    '    user_id = request.args.get("id")',
+    '    cur = conn.cursor()',
+    '    cur.execute("SELECT * FROM users WHERE id = " + user_id)',
+    '    return cur.fetchall()',
+    '',
   ].join('\n'))
   await writeFile(join(root, 'app', 'clean.ts'), 'export const a = 1\n')
   return root
@@ -143,6 +151,7 @@ describe('the local pass with the grammar pack installed', () => {
     expect(rules).toContain('command-injection')
     expect(rules).toContain('path-traversal')
     expect(rules).toContain('ssrf')
+    expect(rules).toContain('sql-injection')
     for (const finding of result.findings) {
       expect(finding.analyzerId).toBe('local-sast')
       expect(finding.filePath).toBe('app/views.py')

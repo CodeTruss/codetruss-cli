@@ -90,6 +90,28 @@ export interface FindingFix {
   safetyNote: string
 }
 
+/**
+ * A developer's inline judgement that one finding is wrong, read from a
+ * `codetruss-ignore: <reason>` comment beside the code. See `suppression.ts`.
+ *
+ * Attached to the finding rather than replacing it. A suppressed finding is
+ * still produced, still counted in the delta, and still written to the receipt
+ * — as suppressed, with its reason. Deleting it instead would let a comment in
+ * the repository decide what the signed evidence is allowed to say.
+ */
+export interface FindingSuppression {
+  /** The text after `codetruss-ignore:`. Empty only when `applied` is false. */
+  reason: string
+  /** 1-based line carrying the marker: the finding's own line, or the one above. */
+  markerLine: number
+  /**
+   * Whether the marker actually dismissed this finding. False for a marker that
+   * gave no reason — the finding stays reported, and the rejected marker is
+   * disclosed so a comment is never seen to fail in silence.
+   */
+  applied: boolean
+}
+
 export interface AnalyzerFinding {
   category: FindingCategory
   severity: FindingSeverity
@@ -104,6 +126,8 @@ export interface AnalyzerFinding {
   effort?: 'low' | 'medium' | 'high'
   metadata?: Record<string, unknown>
   analyzerId?: string
+  /** Present only when an inline marker was found beside this finding. */
+  suppression?: FindingSuppression
 }
 
 export interface AnalyzerRunResult {

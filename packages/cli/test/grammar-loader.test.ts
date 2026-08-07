@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { pinnedGrammarPack } from '../src/grammar-pack-manifest.js'
+import {
+  pinnedGrammarPack,
+  type PinnedGrammarFile,
+  type PinnedGrammarPack,
+} from '../src/grammar-pack-manifest.js'
 import type { GrammarPackState } from '../src/grammar-pack.js'
 
 /**
@@ -94,6 +98,78 @@ describe('the loader executes verified bytes, never a path', () => {
     stub.current = { status: 'verified', pack, dir, contents: await verifiedContents() }
     const load = await loadGrammarParser('python')
     expect(load.status).toBe('verified')
+  })
+})
+
+/**
+ * Which artifact is the grammar is a question the pin answers explicitly.
+ *
+ * It used to be answered by `files.find(f => f.name.startsWith('tree-sitter-'))`
+ * — the first match — while the pin verifier only proved that each published
+ * digest appeared SOMEWHERE in the generated file. The two together meant a pin
+ * with an extra entry ordered ahead of the real grammar passed review and was
+ * loaded instead of it.
+ */
+describe('the grammar is selected by role, not by name shape', () => {
+  it('ignores an injected artifact that would have won the old name-prefix match', async () => {
+    const dir = await scratchDir()
+    const contents = await verifiedContents()
+    contents.set('tree-sitter-evil.wasm', Buffer.from('not wasm'))
+    const injected: PinnedGrammarPack = {
+      ...pack,
+      files: [
+        // No role, because the generated pin had no such field when this shape
+        // was hand-editable — and ordered first, matching `tree-sitter-`, which
+        // is exactly what the old `find` resolved as the grammar.
+        {
+          name: 'tree-sitter-evil.wasm',
+          url: '/downloads/grammars/python-1.0.0/tree-sitter-evil.wasm',
+          bytes: 8,
+          sha256: 'a'.repeat(64),
+        } as PinnedGrammarFile,
+        ...pack.files,
+      ],
+    }
+
+    stub.current = { status: 'verified', pack: injected, dir, contents }
+    const load = await loadGrammarParser('python')
+
+    // Against the old loader the injected file is the grammar, `Language.load`
+    // is handed `not wasm`, and this is a runtime failure instead.
+    expect(load.status).toBe('verified')
+    if (load.status !== 'verified') throw new Error('expected a verified load')
+    const tree = await load.parser.parse('python', 'import os\nos.system(name)\n')
+    expect(tree).not.toBeNull()
+    expect(tree!.hasError).toBe(false)
+    tree!.release()
+  })
+
+  it('refuses a pack that declares two grammars rather than loading the first', async () => {
+    const dir = await scratchDir()
+    const contents = await verifiedContents()
+    contents.set('tree-sitter-evil.wasm', Buffer.from('not wasm'))
+    const ambiguous: PinnedGrammarPack = {
+      ...pack,
+      files: [
+        {
+          name: 'tree-sitter-evil.wasm',
+          role: 'grammar',
+          url: '/downloads/grammars/python-1.0.0/tree-sitter-evil.wasm',
+          bytes: 8,
+          sha256: 'a'.repeat(64),
+        },
+        ...pack.files,
+      ],
+    }
+
+    stub.current = { status: 'verified', pack: ambiguous, dir, contents }
+    const load = await loadGrammarParser('python')
+
+    // A malformed pin is this binary's defect, not the user's install, so it
+    // must not render the receipt sentence that accuses their pack of tampering.
+    expect(load).toMatchObject({ status: 'failed', kind: 'runtime' })
+    if (load.status !== 'failed') throw new Error('expected a failed load')
+    expect(load.reason).toContain('role grammar')
   })
 })
 

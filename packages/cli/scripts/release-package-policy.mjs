@@ -1,3 +1,5 @@
+import { CLI_REPOSITORY_URL } from './release-metadata.mjs'
+
 function hasEntries(value) {
   if (value === undefined || value === null) return false
   if (Array.isArray(value)) return value.length > 0
@@ -15,9 +17,9 @@ export function assertReleasePackagePolicy(pkg) {
     throw new Error('published CLI package identity or executable mapping is invalid')
   }
   if (
-    pkg.repository?.url !== 'git+https://github.com/DeliriumPulse/codetruss-cli.git'
+    pkg.repository?.url !== `git+${CLI_REPOSITORY_URL}.git`
     || pkg.homepage !== 'https://codetruss.com/cli'
-    || pkg.bugs?.url !== 'https://github.com/DeliriumPulse/codetruss-cli/issues'
+    || pkg.bugs?.url !== `${CLI_REPOSITORY_URL}/issues`
   ) {
     throw new Error('published CLI package does not identify the canonical source, product, and support pages')
   }

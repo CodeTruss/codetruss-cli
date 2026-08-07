@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
-import { createServer, type Server } from 'node:http'
+import { createServer, type Server, type ServerResponse } from 'node:http'
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import type { Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,7 +21,10 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const publishedDir = join(repoRoot, 'public', 'downloads', 'grammars')
 
 const cleanup: string[] = []
+/** Per-test servers, torn down with their still-open sockets. */
+const servers: Array<() => Promise<void>> = []
 afterEach(async () => {
+  await Promise.all(servers.splice(0).map((close) => close()))
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 
@@ -351,6 +355,79 @@ describe.skipIf(process.platform === 'win32')('symlinks and loose permissions', 
     await installGrammarPack('python', env)
     expect((await lstat(root)).mode & 0o777).toBe(0o700)
     await expect(inspectGrammarPack('python', env)).resolves.toMatchObject({ status: 'verified' })
+  })
+})
+
+/**
+ * A hostile or broken origin must not be able to hang `grammars install`.
+ *
+ * Both cases here are servers that never violate any integrity rule — they just
+ * never finish. Without a deadline the install waits for them forever, which is
+ * a foreground command a person is watching with no output and no way to know
+ * whether it is working.
+ */
+describe('a stalled download is abandoned, not waited out', () => {
+  /** A server that answers `handler` and is torn down with the test. */
+  async function stallingOrigin(handler: (res: ServerResponse) => void): Promise<string> {
+    const sockets = new Set<Socket>()
+    const stalling = createServer((_req, res) => handler(res))
+    stalling.on('connection', (socket) => {
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+    })
+    await new Promise<void>((resolve) => stalling.listen(0, '127.0.0.1', resolve))
+    servers.push(async () => {
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve) => stalling.close(() => resolve()))
+    })
+    const address = stalling.address()
+    return `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+  }
+
+  /** {@link scratchEnv}, pointed at a server that will not finish. */
+  async function stalledEnv(handler: (res: ServerResponse) => void): Promise<NodeJS.ProcessEnv> {
+    return { ...(await scratchEnv()), [DEV_GRAMMAR_ORIGIN_ENV]: await stallingOrigin(handler) }
+  }
+
+  it('gives up on a body that sends one byte and never ends', async () => {
+    // The exact shape the review demonstrated: a valid response, one byte, and
+    // then silence. Nothing about it is short, over-long or mis-hashed — the
+    // stream simply never ends, so only a clock can end it.
+    const env = await stalledEnv((res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' })
+      res.write(Buffer.from([0x41]))
+    })
+
+    await expect(installGrammarPack('python', env, { totalMs: 5_000, idleMs: 250 }))
+      .rejects.toThrow(/sent no data for 250ms/)
+    // A failed install leaves nothing a later run could mistake for a pack.
+    await expect(inspectGrammarPack('python', env)).resolves.toMatchObject({ status: 'absent' })
+  })
+
+  it('gives up on a server that accepts the connection and never answers', async () => {
+    const env = await stalledEnv(() => {})
+    await expect(installGrammarPack('python', env, { totalMs: 5_000, idleMs: 250 }))
+      .rejects.toThrow(/sent no data for 250ms/)
+  })
+
+  it('gives up on a drip feed that never trips the idle clock', async () => {
+    // Progress without an end: a byte every 50ms keeps resetting the idle timer,
+    // so the total budget is the only thing that can stop it. 738 KB at this
+    // rate would take ten hours.
+    const env = await stalledEnv((res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' })
+      const drip = setInterval(() => res.write(Buffer.from([0x41])), 50)
+      res.on('close', () => clearInterval(drip))
+    })
+
+    await expect(installGrammarPack('python', env, { totalMs: 600, idleMs: 5_000 }))
+      .rejects.toThrow(/did not finish within 600ms/)
+  })
+
+  it('leaves a healthy install unaffected by the deadlines', async () => {
+    const env = await scratchEnv()
+    await expect(installGrammarPack('python', env, { totalMs: 30_000, idleMs: 10_000 }))
+      .resolves.toMatchObject({ alreadyInstalled: false })
   })
 })
 

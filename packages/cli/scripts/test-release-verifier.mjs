@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildDeterministicPackageArchive, PACKAGE_ARCHIVE_FILES } from './deterministic-package.mjs'
+import { attestationCommand, buildReleaseManifest, serialiseReleaseManifest } from './release-metadata.mjs'
 import { verifyRelease } from './verify-release.mjs'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -27,23 +28,53 @@ async function writeRelease(archivePackageDir = packageDir) {
   await writeFile(join(downloadDir, 'codetruss-cli-latest.sbom.cdx.json'), sbom)
   await writeFile(join(downloadDir, `${versionedName}.sha256`), `${sha256}  ${versionedName}\n`)
   await writeFile(join(downloadDir, `${latestName}.sha256`), `${sha256}  ${latestName}\n`)
-  await writeFile(join(downloadDir, 'codetruss-cli-latest.json'), `${JSON.stringify({
-    name: pkg.name,
-    version: pkg.version,
-    url: `/downloads/${versionedName}`,
-    latestUrl: `/downloads/${latestName}`,
-    sha256,
-    sbomUrl: `/downloads/${versionedSbomName}`,
-    sbomSha256,
-    node: pkg.engines.node,
-    repository: 'https://github.com/DeliriumPulse/codetruss-cli',
-    releaseUrl: `https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v${pkg.version}`,
-    attestationCommand: `gh attestation verify ${versionedName} --repo DeliriumPulse/codetruss-cli`,
-  }, null, 2)}\n`)
+  await writeFile(
+    join(downloadDir, 'codetruss-cli-latest.json'),
+    serialiseReleaseManifest(buildReleaseManifest({ pkg, sha256, sbomSha256 })),
+  )
   return { versionedName, latestName }
 }
 
 try {
+  // The published manifest is a copy-paste instruction. A command that names a
+  // repository GitHub cannot resolve is worse than no command at all, so pin the
+  // exact string. Every release still in circulation is attested under the
+  // organisation, so the command does not vary by version — the assertions below
+  // are what would fail if a version-dependent form were reintroduced.
+  assert.equal(
+    attestationCommand('codetruss-cli-0.2.41.tgz'),
+    'gh attestation verify codetruss-cli-0.2.41.tgz --repo CodeTruss/codetruss-cli',
+  )
+  for (const version of ['0.2.14', '0.2.36', '0.2.39', '0.2.40', '0.2.41', '0.3.0', '1.0.0']) {
+    const command = attestationCommand(`codetruss-cli-${version}.tgz`)
+    assert.equal(
+      command,
+      `gh attestation verify codetruss-cli-${version}.tgz --repo CodeTruss/codetruss-cli`,
+      `${version} must advertise the organisation-scoped command, which is what verifies today`,
+    )
+    assert.doesNotMatch(
+      command,
+      /--repo DeliriumPulse\//,
+      `${version} must not advertise the transferred repository slug, which returns HTTP 404`,
+    )
+  }
+
+  // The live pointer file is served to users between releases, so it must stay
+  // in step with the generator without waiting for the next artifact build.
+  const shippedManifest = JSON.parse(
+    await readFile(join(resolve(packageDir, '../..'), 'public', 'downloads', 'codetruss-cli-latest.json'), 'utf8'),
+  )
+  assert.equal(
+    shippedManifest.attestationCommand,
+    attestationCommand(`codetruss-cli-${shippedManifest.version}.tgz`),
+    'public/downloads/codetruss-cli-latest.json advertises a stale attestation command',
+  )
+  assert.equal(shippedManifest.repository, 'https://github.com/CodeTruss/codetruss-cli')
+  assert.equal(
+    shippedManifest.releaseUrl,
+    `https://github.com/CodeTruss/codetruss-cli/releases/tag/v${shippedManifest.version}`,
+  )
+
   await mkdir(downloadDir, { recursive: true })
   const names = await writeRelease()
   await verifyRelease({ packageDir, downloadDir })

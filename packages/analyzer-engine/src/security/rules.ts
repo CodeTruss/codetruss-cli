@@ -90,7 +90,73 @@ const CHILD_PROCESS_RECEIVER = /(^|[._])(child_?process|cp|proc|shell)$/i
 
 const SQL_ALWAYS = new Set(['query', 'raw', 'unsafe', 'executequery', 'executeupdate', 'executesql', 'rawquery'])
 /** Method names that execute SQL only on a DB-ish receiver. */
-const SQL_GATED = new Set(['execute', 'exec'])
+const SQL_GATED = new Set(['execute', 'exec', 'executemany'])
+/** The DB-API cursor methods among {@link SQL_GATED}: for these the receiver may
+ *  also be proven a cursor by its binding, not just by its name. `exec` stays
+ *  name-gated — a bare `.exec()` is RegExp.prototype.exec far more often than
+ *  it is SQL, and resolving its binding would buy nothing but scan time. */
+const CURSOR_METHODS = new Set(['execute', 'executemany'])
+
+/** A `<conn>.cursor()` call — the DB-API idiom that hands back a cursor. */
+function isCursorFactoryCall(node: SyntaxNode, lang: SastLanguage): boolean {
+  const c = asCall(unwrap(node, lang), lang)
+  return !!c && !!c.receiver && lc(c.method) === 'cursor'
+}
+
+/**
+ * True when this call's receiver is a local BOUND to a DB cursor —
+ * `cur = conn.cursor()` or `with conn.cursor() as cur:` — rather than a name
+ * that merely reads DB-ish.
+ *
+ * {@link DB_RECEIVER} is a purely lexical test. It catches `cursor.execute(...)`
+ * and the direct chain `conn.cursor().execute(...)` (whose dotted receiver name
+ * is `conn.cursor`), but goes blind the moment the cursor is parked in a short
+ * local — `cur`, `c`, `crsr` — which is how most psycopg/sqlite3/MySQLdb code is
+ * actually written. Resolving the binding restores that canonical two-step form
+ * without loosening the lexical gate to generic names, which would cost
+ * precision everywhere else.
+ */
+function receiverBindsToCursor(call: NCall, lang: SastLanguage): boolean {
+  if (!call.receiver) return false
+  const name = identifierName(call.receiver, lang)
+  if (!name) return false
+  // Innermost enclosing scope that binds the name wins (program root last).
+  let scope: SyntaxNode | null = call.node.parent
+  for (let i = 0; i < 60 && scope; i++) {
+    const isRoot = scope.parent === null
+    if (isFunctionNode(scope, lang) || isRoot) {
+      const fn = isFunctionNode(scope, lang) ? asFunction(scope, lang) : null
+      const body = isRoot && !fn ? scope : fn?.body
+      if (body) {
+        const defs = [
+          ...collectAssignments(body, lang).filter((a) => a.target === name).map((a) => a.value),
+          ...withAliasDefs(body, name, lang),
+        ]
+        if (defs.length > 0) return defs.some((d) => isCursorFactoryCall(d, lang))
+      }
+    }
+    scope = scope.parent
+  }
+  return false
+}
+
+/** `with <expr> as name:` bindings in a scope — python models them as an
+ *  `as_pattern`, which {@link collectAssignments} does not treat as a def. */
+function withAliasDefs(body: SyntaxNode, name: string, lang: SastLanguage): SyntaxNode[] {
+  const out: SyntaxNode[] = []
+  const visit = (node: SyntaxNode) => {
+    if (node !== body && isFunctionNode(node, lang)) return // separate scope
+    if (node.type === 'as_pattern') {
+      const alias = node.childForFieldName('alias')
+      const value = node.namedChildren[0]
+      const bound = alias ? identifierName(alias.namedChildren[0] ?? alias, lang) : null
+      if (value && bound === name) out.push(value)
+    }
+    for (const c of node.namedChildren) visit(c)
+  }
+  visit(body)
+  return out
+}
 
 // NOTE: generic receiver names like `client`/`session` are deliberately NOT here.
 // They match Redis/DB/gRPC/GraphQL clients (`client.get(id)`), which are not HTTP
@@ -140,10 +206,13 @@ export const TAINT_SINKS: TaintSink[] = [
     title: 'SQL injection',
     message: 'Untrusted input is concatenated into a SQL query and executed. An attacker can alter the query to read or modify arbitrary data.',
     remediation: 'Use parameterized queries / prepared statements and pass user input as bound parameters, never string concatenation.',
-    match(call) {
+    match(call, lang) {
       const m = lc(call.method)
       if (SQL_ALWAYS.has(m)) return [0]
-      if (SQL_GATED.has(m) && DB_RECEIVER.test(call.receiverName ?? '')) return [0]
+      if (SQL_GATED.has(m)) {
+        if (DB_RECEIVER.test(call.receiverName ?? '')) return [0]
+        if (CURSOR_METHODS.has(m) && receiverBindsToCursor(call, lang)) return [0]
+      }
       // Go database/sql, gated on a DB-ish receiver. Context variants take
       // (ctx, query, ...args) so the SQL string is argument 1, not 0.
       if (DB_RECEIVER.test(call.receiverName ?? '')) {

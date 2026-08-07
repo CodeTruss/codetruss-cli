@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { assertReleasePackagePolicy } from './release-package-policy.mjs'
+import { buildReleaseManifest, serialiseReleaseManifest } from './release-metadata.mjs'
 import { cycloneDxSerialNumber } from './generate-sbom.mjs'
 import { verifyDeterministicPackageArchive } from './verify-deterministic-package.mjs'
 
@@ -24,21 +25,9 @@ export async function verifyRelease({ packageDir = defaultPackageDir, downloadDi
   const latestSbom = await readFile(join(downloadDir, 'codetruss-cli-latest.sbom.cdx.json'))
   const versionedSha = digest(versioned)
   const sbomSha = digest(versionedSbom)
-  const expectedMetadata = {
-    name: pkg.name,
-    version: pkg.version,
-    url: `/downloads/${versionedName}`,
-    latestUrl: `/downloads/${latestName}`,
-    sha256: versionedSha,
-    sbomUrl: `/downloads/${versionedSbomName}`,
-    sbomSha256: sbomSha,
-    node: pkg.engines.node,
-    repository: 'https://github.com/DeliriumPulse/codetruss-cli',
-    releaseUrl: `https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v${pkg.version}`,
-    attestationCommand: `gh attestation verify ${versionedName} --repo DeliriumPulse/codetruss-cli`,
-  }
+  const expectedMetadata = buildReleaseManifest({ pkg, sha256: versionedSha, sbomSha256: sbomSha })
   const metadataBytes = await readFile(join(downloadDir, 'codetruss-cli-latest.json'))
-  const expectedMetadataBytes = Buffer.from(`${JSON.stringify(expectedMetadata, null, 2)}\n`, 'utf8')
+  const expectedMetadataBytes = Buffer.from(serialiseReleaseManifest(expectedMetadata), 'utf8')
   if (!metadataBytes.equals(expectedMetadataBytes)) {
     throw new Error(`release metadata is not the canonical manifest for CLI ${pkg.version}; run pnpm cli:release`)
   }

@@ -146,8 +146,21 @@ export interface LlmReview {
 
 interface AnalyzerReceiptEvidence {
   passes: AnalyzerPass[]
-  /** Only findings introduced or worsened between the reviewed snapshots. */
+  /** Only findings introduced or worsened between the reviewed snapshots, minus any dismissed inline. */
   findings: AnalyzerFinding[]
+  /**
+   * Findings dismissed by an inline `codetruss-ignore: <reason>` comment, each
+   * carrying the reason given. Whole-repository, not delta-scoped, and present
+   * only when this repository dismissed something — which is what keeps every
+   * receipt signed before suppression existed rendering byte for byte.
+   */
+  suppressed?: AnalyzerFinding[]
+  /**
+   * `path:line` of markers that gave no reason and therefore dismissed nothing.
+   * Their findings stay in `findings`; this exists so a comment is never seen to
+   * fail in silence.
+   */
+  rejectedSuppressions?: string[]
   delta?: { introduced: number; worsened: number; recurring: number; resolved: number }
   index: Pick<RepoIndex, 'totalLoc' | 'languages' | 'primaryLanguage'>
 }

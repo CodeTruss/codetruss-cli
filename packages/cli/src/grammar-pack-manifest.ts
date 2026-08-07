@@ -5,10 +5,19 @@
  * checks a download against, and what every subsequent load re-checks on disk.
  * A pack whose bytes do not hash to exactly these values is never loaded, and
  * the run discloses Python as skipped instead.
+ *
+ * `pnpm grammars:verify` re-derives this entire file from the published
+ * artifacts and compares it byte for byte, so an edit here — a digest moved to
+ * another name, an artifact nobody published, a fourth entry — fails the build
+ * rather than shipping.
  */
+
+/** What the loader does with an artifact. Exactly one artifact per role, per pack. */
+export type GrammarFileRole = 'runtime' | 'runtime-wasm' | 'grammar'
 
 export interface PinnedGrammarFile {
   name: string
+  role: GrammarFileRole
   /** Path under the downloads origin, e.g. `/downloads/grammars/python-1.0.0/…`. */
   url: string
   bytes: number
@@ -41,18 +50,21 @@ export const PINNED_GRAMMAR_PACKS: readonly PinnedGrammarPack[] = [
     "files": [
       {
         "name": "tree-sitter.js",
+        "role": "runtime",
         "url": "/downloads/grammars/python-1.0.0/tree-sitter.js",
         "bytes": 74197,
         "sha256": "ddcacb69cd26c07322c51b798a63805fd99c272177c9633a978f3886358ca070"
       },
       {
         "name": "tree-sitter.wasm",
+        "role": "runtime-wasm",
         "url": "/downloads/grammars/python-1.0.0/tree-sitter.wasm",
         "bytes": 188635,
         "sha256": "29208e71028ab0c11dfcc941255075aad75545394467aa22d817a6356714090f"
       },
       {
         "name": "tree-sitter-python.wasm",
+        "role": "grammar",
         "url": "/downloads/grammars/python-1.0.0/tree-sitter-python.wasm",
         "bytes": 476105,
         "sha256": "9056d0fb0c337810d019fae350e8167786119da98f0f282aceae7ab89ee8253b"
