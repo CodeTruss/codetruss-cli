@@ -1,0 +1,83 @@
+name: Attest release
+
+# Rebuilds a published release from its tag and attests the result. The build is
+# deterministic, so a rebuild of the tagged source reproduces the published
+# archive byte for byte. This workflow asserts that before it signs anything: if
+# the rebuild does not match the checksum published with the release, it fails
+# and attests nothing. An attestation is a claim that this workflow built these
+# exact bytes from this exact source, and it is only worth making when true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Released tag to rebuild and attest, for example v0.2.39
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: attest-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  attest:
+    name: Rebuild and attest ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Activate pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Rebuild the release artifact from the tagged source
+        run: pnpm release:artifact
+      - name: Require the rebuild to match the published checksum
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          NAME="codetruss-cli-${VERSION}.tgz"
+          ARCHIVE="public/downloads/${NAME}"
+
+          # The expected digest comes from the checksum published alongside the
+          # release, never from anything computed in this job.
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "${NAME}.sha256" \
+            --dir published
+          PUBLISHED="$(cut -d' ' -f1 "published/${NAME}.sha256")"
+          REBUILT="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+
+          echo "published $PUBLISHED"
+          echo "rebuilt   $REBUILT"
+
+          if [ "$PUBLISHED" != "$REBUILT" ]; then
+            echo "::error::$NAME did not rebuild to its published digest; refusing to attest bytes this workflow cannot reproduce"
+            exit 1
+          fi
+
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+      - name: Attest package build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.artifact.outputs.archive }}
