@@ -60,11 +60,11 @@ jobs:
           echo "checksum=public/downloads/codetruss-cli-${VERSION}.tgz.sha256" >> "$GITHUB_OUTPUT"
           echo "sbom=public/downloads/codetruss-cli-${VERSION}.sbom.cdx.json" >> "$GITHUB_OUTPUT"
       - name: Attest package build provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.artifact.outputs.archive }}
       - name: Attest package SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.artifact.outputs.archive }}
           sbom-path: ${{ steps.artifact.outputs.sbom }}
