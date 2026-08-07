@@ -7,9 +7,11 @@ account, npm token, package access, or npm environment approval.
 ## GitHub release
 
 1. Confirm CI is green on `main` and the package version and changelog are final.
-   Update `release-reference.json` from the immutable website candidate. The
-   verifier rejects any archive, SBOM, or executable digest that differs from
-   that checked-in reference.
+   Update `release-reference.json` from the immutable website candidate. This
+   is a checked-in record of the released digests, not an enforced control: no
+   script or workflow reads it today, so it can drift without anything failing
+   (it sat a full release stale before this was noticed). Treat it as
+   documentation until the verifier is changed to require it.
 2. Create and push the matching annotated tag, for example `v0.2.30` for package
    version `0.2.30`.
 3. `.github/workflows/release.yml` installs the locked dependency graph, runs
