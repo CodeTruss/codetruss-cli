@@ -7,6 +7,13 @@ settings:
 importers:
 
   .:
+    dependencies:
+      tree-sitter-wasms:
+        specifier: 0.1.11
+        version: 0.1.11
+      web-tree-sitter:
+        specifier: 0.22.6
+        version: 0.22.6
     devDependencies:
       '@codetruss/analyzer-engine':
         specifier: workspace:*
@@ -557,6 +564,9 @@ packages:
     resolution: {integrity: sha512-Bf+ILmBgretUrdJxzXM0SgXLZ3XfiaUuOj/IKQHuTXip+05Xn+uyEYdVg0kYDipTBcLrCVyUzAPz7QmArb0mmw==}
     engines: {node: '>=14.0.0'}
 
+  tree-sitter-wasms@0.1.11:
+    resolution: {integrity: sha512-26sE4+qoTi1CbzHdo9sHs9pRE/jXVFVRigSG/5TNAbwhSMVjHfMAg4UjmOhAFAIx5UxgoQuaURwqhm0SRNrpWA==}
+
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
@@ -656,6 +666,9 @@ packages:
         optional: true
       jsdom:
         optional: true
+
+  web-tree-sitter@0.22.6:
+    resolution: {integrity: sha512-hS87TH71Zd6mGAmYCvlgxeGDjqd9GTeqXNqTT+u0Gs51uIozNIaaq/kUAbV/Zf56jb2ZOyG8BxZs2GG9wbLi6Q==}
 
   why-is-node-running@2.3.0:
     resolution: {integrity: sha512-hUrmaWBdVDcxvYqnyh09zunKzROWjbZTiNy8dBEjkS7ehEDQibXJ7XvlmtbwuTclUiIyN+CyXQD4Vmko8fNm8w==}
@@ -1057,6 +1070,8 @@ snapshots:
 
   tinyrainbow@3.1.0: {}
 
+  tree-sitter-wasms@0.1.11: {}
+
   tslib@2.8.1:
     optional: true
 
@@ -1110,6 +1125,8 @@ snapshots:
       '@types/node': 20.19.43
     transitivePeerDependencies:
       - msw
+
+  web-tree-sitter@0.22.6: {}
 
   why-is-node-running@2.3.0:
     dependencies:
