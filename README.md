@@ -50,13 +50,20 @@ and verify its published SHA-256 digest before installing.
 To pin an exact version, install the immutable archive directly:
 
 ```bash
+# every published version, immutable, at a stable URL
 npm install --global --ignore-scripts --no-audit --no-fund \
-  https://codetruss.com/downloads/codetruss-cli-0.2.39.tgz
+  https://codetruss.com/downloads/codetruss-cli-<version>.tgz
+
+# or the current release, without naming a version
+npm install --global --ignore-scripts --no-audit --no-fund \
+  https://codetruss.com/downloads/codetruss-cli-latest.tgz
 ```
 
-The `@codetruss/cli` package on the npm registry is published as a separate,
-manually dispatched step and currently trails the website at `0.2.24`. Use the
-installers or the versioned archive above for the current release.
+The `@codetruss/cli` package on the npm registry is published by a separate,
+manually approved step, so it can trail the website by a release or two. Check
+[npmjs.com/package/@codetruss/cli](https://www.npmjs.com/package/@codetruss/cli)
+for what npm currently serves; the installers and the archives above are always
+the current release.
 
 ## First run
 
@@ -325,8 +332,8 @@ clean global install.
 Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-0.2.39.tgz --repo CodeTruss/codetruss-cli
-shasum -a 256 -c codetruss-cli-0.2.39.tgz.sha256
+gh attestation verify codetruss-cli-<version>.tgz --repo CodeTruss/codetruss-cli
+shasum -a 256 -c codetruss-cli-<version>.tgz.sha256
 ```
 
 Maintainers should follow [docs/RELEASE.md](docs/RELEASE.md). Tag-driven GitHub
