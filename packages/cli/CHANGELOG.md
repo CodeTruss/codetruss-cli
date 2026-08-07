@@ -5,6 +5,36 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.46 — 2026-08-07
+
+- **A repository's own scope globs could crash the review that reads them.**
+  `--allow` and `--deny` are matched with `minimatch`, which expands brace
+  groups through `brace-expansion`, and the bundled copy was 5.0.7. That version
+  bounds the *number* of expansions at 100,000 but not their *length*, so a
+  pattern like `{a,b}` repeated a few hundred times keeps the count under the
+  cap while making every result as long as the pattern has groups. The arrays
+  built while combining them exhaust the heap and abort the process
+  (CVE-2026-14257, and the incomplete fix for it). This is reachable here
+  because `allow` and `deny` are read from the scanned repository's
+  `.codetruss.yml` and validated only as non-empty strings: on 0.2.45's shipped
+  bundle, a 7.5 KB glob in that file ends `codetruss review` with an uncatchable
+  out-of-memory abort rather than a verdict. `brace-expansion` moves to 5.0.9,
+  which bounds the intermediate arrays as well, and the same input now returns a
+  verdict. Scope matching is otherwise unchanged.
+
+  What this is not: nothing is disclosed, nothing is altered, and no verdict
+  changes. A pattern cannot reach the matcher from a diff, a filename, or the
+  network — only from flags you typed or a config file in the tree you pointed
+  the CLI at. The worst outcome was a local tool dying instead of reporting.
+
+- **Dependency floors that were pinned to vulnerable versions have been
+  raised.** `minimatch` moves to 10.2.6, whose own `^5.0.8` requirement means
+  `brace-expansion` can no longer resolve below the patched line. `postcss` was
+  held at 8.5.16 by a workspace override added as a security pin months ago and
+  never refreshed; it moves to 8.5.26, which carries `nanoid` 3.3.18 with it.
+  Neither `postcss` nor `nanoid` is in the shipped bundle — they reach the
+  repository only through the test runner — so this changes nothing you install.
+
 ## 0.2.45 — 2026-08-07
 
 - **A PASS was reachable by typing.** `codetruss-ignore: <reason>` exists so a
