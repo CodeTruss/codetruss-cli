@@ -157,6 +157,93 @@ describe('turn-scoped scope inference', () => {
     expect(roots.map((root) => root.root)).toEqual(['server/handlers'])
   })
 
+  // The 0.2.36 teardown ran the unconfigured first-run demo — no .codetruss.yml,
+  // no --allow — and the file the task never mentioned came back `inferred`, so
+  // the one detection nobody else ships reported nothing on the one path every
+  // stranger walks. Each file had seated its own directory as a working set.
+  it('does not let a lone file vouch for its own directory while the turn infers elsewhere', () => {
+    const files = turn(['src/lib/billing.ts', 'src/routes/tasks.ts'], [])
+
+    const { files: classified, roots } = resolve('Add free-text search to the task list endpoint', files, [])
+
+    // Two lone files in two directories, no configured scope, and a task naming
+    // no path: nothing here says which directory the turn was about. Blessing
+    // both is the circular answer, and picking one would be a guess.
+    expect(scope(classified)).toEqual({
+      'src/lib/billing.ts': 'unexpected',
+      'src/routes/tasks.ts': 'unexpected',
+    })
+    expect(roots).toEqual([])
+  })
+
+  it('still seats a single file when that root is the whole of what the turn inferred', () => {
+    const files = turn(['src/routes/tasks.ts'], [])
+
+    const { files: classified, roots } = resolve('Add free-text search to the task list endpoint', files, [])
+
+    expect(scope(classified)).toEqual({ 'src/routes/tasks.ts': 'inferred' })
+    expect(roots).toEqual([{ root: 'src/routes', basis: 'working-set', evidence: ['src/routes/tasks.ts'] }])
+  })
+
+  it('refuses to widen a scope the task already declared with a lone file elsewhere', () => {
+    const files = turn(['src/auth/reset.ts', 'src/mailer/send.ts'], [])
+
+    // The task named src/auth and the turn changed a file under it, so the task
+    // has said what this turn is about. The stray mailer file is the drift.
+    const { files: classified, roots } = resolve('Add password reset under src/auth', files, [])
+
+    expect(scope(classified)).toEqual({
+      'src/auth/reset.ts': 'inferred',
+      'src/mailer/send.ts': 'unexpected',
+    })
+    expect(roots).toEqual([{ root: 'src/auth', basis: 'task-reference', evidence: ['src/auth'] }])
+  })
+
+  it('still admits a genuine second cluster beside a root the task named', () => {
+    const files = turn([
+      'src/auth/reset.ts',
+      'src/mailer/send.ts',
+      'src/mailer/templates.ts',
+    ], [])
+
+    // A new sibling subsystem the turn actually built out clears cohesion 2 on
+    // its own evidence; only the lone file could not.
+    const { files: classified, roots } = resolve('Add password reset under src/auth', files, [])
+
+    expect(scope(classified)).toEqual({
+      'src/auth/reset.ts': 'inferred',
+      'src/mailer/send.ts': 'inferred',
+      'src/mailer/templates.ts': 'inferred',
+    })
+    expect(roots.map((root) => root.root)).toEqual(['src/auth', 'src/mailer'])
+  })
+
+  it('admits a new sibling directory the task named by feature, however few files it has', () => {
+    const files = turn(['src/auth/reset.ts', 'src/password-reset/token.ts'], [])
+
+    // Creating a directory named for the feature is the task naming it: the
+    // feature-name rule reaches it without any help from cohesion.
+    const { files: classified } = resolve('Add password reset under src/auth', files, [])
+
+    expect(scope(classified)).toEqual({
+      'src/auth/reset.ts': 'inferred',
+      'src/password-reset/token.ts': 'inferred',
+    })
+  })
+
+  it('will not seat a rename destination on a single file once the task named a root', () => {
+    const files = turn(['src/auth/reset.ts', ['src/mailer/send.ts', 'src/auth/send.ts']], [])
+
+    // Moving a file out of the declared root and into a directory of its own is
+    // exactly the drift a single-file working set used to launder.
+    const { files: classified } = resolve('Add password reset under src/auth', files, [])
+
+    expect(scope(classified)).toEqual({
+      'src/auth/reset.ts': 'inferred',
+      'src/mailer/send.ts': 'unexpected',
+    })
+  })
+
   it('admits a test file only when it mirrors a source file already in scope', () => {
     const allow = ['src/**']
     const files = turn(['src/auth/reset.ts', 'tests/auth/reset.test.ts', 'tests/billing/refund.test.ts'], allow)
