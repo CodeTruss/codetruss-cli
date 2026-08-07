@@ -17,6 +17,10 @@
     "test:install": "pnpm --filter @codetruss/cli test:install",
     "validate": "pnpm typecheck && pnpm release:artifact && pnpm test && pnpm release:verify && pnpm test:install"
   },
+  "dependencies": {
+    "tree-sitter-wasms": "0.1.11",
+    "web-tree-sitter": "0.22.6"
+  },
   "devDependencies": {
     "@codetruss/analyzer-engine": "workspace:*",
     "@codetruss/cli": "workspace:*"
