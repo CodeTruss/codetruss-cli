@@ -44,7 +44,7 @@ To pin an exact version, install the immutable archive directly:
 
 ```bash
 npm install --global --ignore-scripts --no-audit --no-fund \
-  https://codetruss.com/downloads/codetruss-cli-0.2.36.tgz
+  https://codetruss.com/downloads/codetruss-cli-0.2.37.tgz
 ```
 
 The `@codetruss/cli` package on the npm registry is published as a separate,
@@ -313,8 +313,8 @@ clean global install.
 Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-0.2.36.tgz --repo DeliriumPulse/codetruss-cli
-shasum -a 256 -c codetruss-cli-0.2.36.tgz.sha256
+gh attestation verify codetruss-cli-0.2.37.tgz --repo DeliriumPulse/codetruss-cli
+shasum -a 256 -c codetruss-cli-0.2.37.tgz.sha256
 ```
 
 Maintainers should follow [docs/RELEASE.md](docs/RELEASE.md). Tag-driven GitHub

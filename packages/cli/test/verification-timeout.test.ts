@@ -55,7 +55,19 @@ describe('verification command lifecycle', () => {
     const descendantScript = join(root, 'escaped-descendant.cjs')
     const parentScript = join(root, 'escaped-parent.cjs')
     const pidFile = join(root, 'escaped-descendant.pid')
-    await writeFile(descendantScript, 'setInterval(() => {}, 1_000)\n')
+    const sentinel = join(root, 'escaped-descendant.keepalive')
+    await writeFile(sentinel, '')
+    // Cleanup must not signal the recorded pid: when the deadline reaps the
+    // tree before the leader exits, the descendant is already dead and Windows
+    // can recycle its pid to an unrelated process within milliseconds — a
+    // SIGKILL there once terminated a concurrent vitest worker. The descendant
+    // instead exits on its own when the sentinel file disappears, and the
+    // afterEach rm (which retries with backoff) absorbs its exit latency.
+    await writeFile(descendantScript, [
+      "const { existsSync } = require('node:fs')",
+      `const sentinel = ${JSON.stringify(sentinel)}`,
+      'setInterval(() => { if (!existsSync(sentinel)) process.exit(0) }, 100)',
+    ].join('\n'))
     await writeFile(parentScript, [
       "const { spawn } = require('node:child_process')",
       "const { writeFileSync } = require('node:fs')",
@@ -63,20 +75,16 @@ describe('verification command lifecycle', () => {
       'child.unref()',
       `writeFileSync(${JSON.stringify(pidFile)}, String(child.pid))`,
     ].join(';'))
-    let descendantPid: number | undefined
 
     try {
       const result = await runVerification(nodeCommand(parentScript), root, 1_024, process.env, 500)
       expect(result.exitCode).toBe(124)
       expect(result.output).toContain('CodeTruss verification timed out after 500ms.')
       expect(result.durationMs).toBeLessThan(2_000)
-      descendantPid = Number(await readFile(pidFile, 'utf8'))
+      const descendantPid = Number(await readFile(pidFile, 'utf8'))
       expect(Number.isSafeInteger(descendantPid)).toBe(true)
     } finally {
-      if (descendantPid !== undefined && processExists(descendantPid)) {
-        try { process.kill(descendantPid, 'SIGKILL') } catch { /* already gone */ }
-        await expectProcessToExit(descendantPid)
-      }
+      await rm(sentinel, { force: true })
     }
   })
 

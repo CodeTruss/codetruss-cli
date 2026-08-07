@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 
 export const LOCAL_COMMAND_MAX_OUTPUT_BYTES = 2_000_000
 
@@ -52,8 +52,17 @@ function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
   }
 }
 
-async function terminateProcessTree(pid: number): Promise<void> {
+async function terminateProcessTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid
+  if (pid === undefined) return
   if (process.platform === 'win32') {
+    // taskkill /t enumerates the tree from the leader pid, so once the leader
+    // has exited it cannot reach anything — and Windows recycles freed pids
+    // within milliseconds, so addressing one can force-kill an unrelated
+    // process. The liveness check uses our own process handle and cannot be
+    // misdirected; a leader exiting between this check and taskkill's own
+    // snapshot is the same narrow race every taskkill user carries.
+    if (child.exitCode !== null || child.signalCode !== null) return
     spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], {
       stdio: 'ignore',
       timeout: 2_000,
@@ -97,7 +106,7 @@ export function runLocalCommand(request: LocalCommandRequest): Promise<LocalComm
     let cleanupPromise: Promise<void> | undefined
 
     const cleanup = () => {
-      cleanupPromise ??= child.pid === undefined ? Promise.resolve() : terminateProcessTree(child.pid)
+      cleanupPromise ??= terminateProcessTree(child)
       return cleanupPromise
     }
     const fail = (reason: LocalCommandFailureReason) => {
