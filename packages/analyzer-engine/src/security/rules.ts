@@ -14,11 +14,13 @@ import {
   isFunctionNode,
   numberLiteralValue,
   stringLiteralValue,
+  subscriptBase,
   unwrap,
   walk,
   type NCall,
 } from './normalize'
 import { readModifyWriteHits } from './rmw'
+import { sourceKindOf } from './taint'
 
 /**
  * The curated, high-precision rule pack.
@@ -165,6 +167,15 @@ const HTTP_CLIENTS = new Set([
   'axios', 'http', 'https', 'requests', 'got', 'superagent', 'fetch',
   'httpclient', 'urllib', 'urllib.request', 'node-fetch', 'undici', 'webclient',
 ])
+
+/**
+ * Receivers that navigate the BROWSER: `location`, `window.location`,
+ * `document.location`. Gating on the receiver is what keeps `assign` and
+ * `replace` — `Object.assign`, `String.prototype.replace` — from firing.
+ */
+const NAVIGATION_RECEIVER = /(^|\.)location$/
+/** Receivers of a client-side router: Next.js `router`, History-API `history`. */
+const ROUTER_RECEIVER = /(^|\.)(router|history)$/
 
 /** A keyword/option argument `name=value` present among a call's args (py/js). */
 function findOption(call: NCall, lang: SastLanguage, name: string): SyntaxNode | null {
@@ -363,7 +374,14 @@ export const TAINT_SINKS: TaintSink[] = [
     taintPosition: 'head',
     match(call) {
       const m = lc(call.method)
+      const recv = lc(call.receiverName)
       if (m === 'redirect' || m === 'sendredirect') return [0]
+      // Browser navigation — `location.assign(url)`, `window.location.replace(url)`.
+      // Receiver-gated: a bare `replace` is String.prototype.replace.
+      if ((m === 'assign' || m === 'replace') && NAVIGATION_RECEIVER.test(recv)) return [0]
+      // Client router — `router.push(url)`, `history.replace(url)`. Same gate:
+      // `push` unqualified is Array.prototype.push on nearly every line it appears.
+      if ((m === 'push' || m === 'replace') && ROUTER_RECEIVER.test(recv)) return [0]
       return null
     },
   },
@@ -472,6 +490,18 @@ export function asNamedValue(
     const nameNode = f('name')
     const value = f('value')
     if (nameNode && value) return { name: clean(nameNode.text), value, node }
+  }
+  if (t === 'jsx_attribute') {
+    // `<Link href={to}>`. Neither grammar names the value with a field, and the
+    // `=` between them is anonymous, so the name is the first named child and
+    // the value the last; a valueless attribute (`disabled`) has only one.
+    const nameNode = node.namedChildren[0]
+    const valueNode = node.namedChildren[node.namedChildren.length - 1]
+    if (nameNode && valueNode && nameNode !== valueNode) {
+      // `{to}` is an expression container; the expression inside it is the value.
+      const value = valueNode.type === 'jsx_expression' ? valueNode.namedChildren[0] : valueNode
+      if (value) return { name: clean(nameNode.text), value, node }
+    }
   }
   if (t === 'assignment_expression' || t === 'assignment') {
     const left = f('left')
@@ -707,6 +737,62 @@ export interface TaintAssignSink extends RuleMeta {
   matchName(name: string): boolean
   /** Sink-local safety: the assigned expression is already safe by construction. */
   safeValue?(value: SyntaxNode, lang: SastLanguage): boolean
+  /**
+   * Binding SHAPES this sink may be written as, by AST node type. Omitted means
+   * every shape `asNamedValue` understands — which for a name as ordinary as
+   * `href` would include `const href = …`, a local variable that navigates
+   * nothing. A sink whose name is common English restricts itself here.
+   */
+  sites?: ReadonlySet<string>
+  /** See {@link TaintSink.taintPosition}. */
+  taintPosition?: 'head'
+  /** What the value reaches, named in the finding's prose and metadata. */
+  surface: string
+}
+
+/**
+ * Binding shapes that navigate: a JSX attribute (`<Link href={to}>`, `<form
+ * action={to}>`) and an assignment (`location.href = to`). Deliberately not
+ * `variable_declarator` or `pair`: naming a local `href` is not navigating, and
+ * every route table in a React codebase is objects with `href` keys.
+ */
+const NAVIGATION_BINDING_SITES: ReadonlySet<string> = new Set([
+  'jsx_attribute',
+  'assignment_expression',
+  'assignment',
+])
+
+/**
+ * True unless the untrusted value IS the navigation target.
+ *
+ * The shapes this sink exists for are `href={returnTo}` and
+ * `href={searchParams.next}` — the target is the untrusted value, or a field of
+ * the request itself. Anything else is a target the untrusted value merely
+ * helped BUILD, and in a React codebase that is dominated by one pattern:
+ * `href={post.cta?.href ?? '/register'}`, where `post` came back from
+ * `getPost(slug)` and the only taint is the route segment used as the lookup
+ * key. Reading the key's taint as the record's taint turns every call-to-action
+ * in a `[slug]` page into an open redirect — measured, that shape plus a JSX
+ * `action` prop holding a component was five false positives in this repository
+ * alone, against the one real defect the sink was added to catch.
+ *
+ * So this sink ships at the precision it can prove. The cost is real and
+ * bounded: a target assembled by concatenation or chosen by a ternary is not
+ * reported here. Widening is a later change made against measurements.
+ */
+function navigationTargetIsIndirect(value: SyntaxNode, lang: SastLanguage): boolean {
+  const n = unwrap(value, lang)
+  if (sourceKindOf(n, lang)) return false
+  if (identifierName(n, lang)) return false
+  // Walk a member/subscript chain to its root: `searchParams.next`, `req.query.to`.
+  let root: SyntaxNode = n
+  for (let depth = 0; depth < 12; depth++) {
+    const inner = asMember(root, lang)?.object ?? subscriptBase(root)
+    if (!inner) break
+    root = unwrap(inner, lang)
+    if (sourceKindOf(root, lang)) return false
+  }
+  return true
 }
 
 /**
@@ -737,6 +823,29 @@ export const TAINT_ASSIGN_SINKS: TaintAssignSink[] = [
     remediation: 'Render the value as text instead of HTML, or sanitize it (DOMPurify) before assigning. For JSON embedded in a script tag, serialize with JSON.stringify and escape "<".',
     matchName: (name) => name === '__html' || name === 'innerhtml' || name === 'outerhtml',
     safeValue: isEscapedJsonLd,
+    surface: 'a raw-HTML binding',
+  },
+  {
+    // Same rule class as the call-shaped `open-redirect` sink above, and the
+    // same id, because it is the same defect: a user-controlled navigation
+    // target. Most redirects in a React codebase are never a redirect CALL —
+    // they are `<Link href={returnTo}>`, `<form action={next}>` or
+    // `location.href = next`, none of which a `match(call)` rule can see.
+    id: 'open-redirect',
+    cweKey: 'OPENREDIR',
+    severity: 'MEDIUM',
+    languages: new Set<SastLanguage>(['javascript', 'typescript', 'tsx']),
+    title: 'Open redirect',
+    message: 'A user-controlled value is used as a navigation target, enabling phishing by sending victims to attacker-chosen sites.',
+    remediation: 'Navigate only to a fixed set of allowed paths, or validate the target against an allow-list of hosts.',
+    matchName: (name) => name === 'href' || name === 'action',
+    sites: NAVIGATION_BINDING_SITES,
+    safeValue: navigationTargetIsIndirect,
+    // Taint confined to a path segment of an origin-relative target
+    // (`/repo/${id}`) cannot send the victim off-origin — which is what keeps
+    // this off the interpolated hrefs that make up most of a React app.
+    taintPosition: 'head',
+    surface: 'a navigation target',
   },
 ]
 

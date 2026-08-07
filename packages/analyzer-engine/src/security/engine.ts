@@ -414,7 +414,11 @@ async function scanOne(
       for (const sink of applicableAssignSinks) {
         const nv = asNamedValue(node, lang)
         if (!nv || !sink.matchName(nv.name)) continue
+        if (sink.sites && !sink.sites.has(node.type)) continue
         if (sink.safeValue?.(nv.value, lang)) continue
+        // Head-position sinks (open redirect): taint confined to a path segment
+        // of an origin-relative target cannot steer the victim off-origin.
+        if (sink.taintPosition === 'head' && headTaintSuppressed(nv.value, rec.ft, lang)) continue
         const origins = taintOf(nv.value, rec.ft)
         if (!hasRealSource(origins)) continue
         const src = firstSource(origins)!
@@ -654,7 +658,7 @@ function makeAssignFinding(
     source,
     sink: sinkLoc,
     steps: [source, sinkLoc],
-    summary: `${sourceKind} -> raw HTML`,
+    summary: `${sourceKind} -> ${sink.surface}`,
     interprocedural: false,
   }
   const sameLine = source.filePath === sinkLoc.filePath && source.line === sinkLoc.line
@@ -666,15 +670,15 @@ function makeAssignFinding(
     severity: sink.severity,
     title: sink.title,
     message: sameLine
-      ? `${sink.message} Untrusted data from ${sourceKind} is assigned to a raw-HTML binding in the same expression (line ${sinkLoc.line}).`
-      : `${sink.message} Untrusted data from ${sourceKind} (line ${source.line}) is assigned to a raw-HTML binding at line ${sinkLoc.line}.`,
+      ? `${sink.message} Untrusted data from ${sourceKind} is assigned to ${sink.surface} in the same expression (line ${sinkLoc.line}).`
+      : `${sink.message} Untrusted data from ${sourceKind} (line ${source.line}) is assigned to ${sink.surface} at line ${sinkLoc.line}.`,
     language: lang,
     filePath,
     line: sinkLoc.line,
     column: sinkNode.startPosition.column + 1,
     flow,
     remediation: sink.remediation,
-    metadata: sortMeta({ sourceKind, sink: 'raw HTML', snippet: snippetAt(lines, sinkLoc.line - 1) }),
+    metadata: sortMeta({ sourceKind, sink: sink.surface, snippet: snippetAt(lines, sinkLoc.line - 1) }),
   }
 }
 

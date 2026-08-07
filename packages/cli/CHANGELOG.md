@@ -5,6 +5,55 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.45 — 2026-08-07
+
+- **A PASS was reachable by typing.** `codetruss-ignore: <reason>` exists so a
+  developer can dismiss a finding beside the code it is about, and the one
+  promise it makes is that "nothing was found" can never be reached by editing
+  text. It could be. A dismissed finding stops gating the verdict — that is what
+  dismissing is for — and the marker was honored wherever those characters
+  appeared on the finding's own line, including inside a string literal. A
+  minified bundle is one physical line, so a single planted string dismissed
+  every credential finding in the file, and the verdict followed. The marker is
+  now read only where a person could have written it. It must sit in a COMMENT,
+  decided by the same classifier the comment analyzers ship, which separates
+  comments from code and from strings; in a language that classifier does not
+  cover, the marker is honored only in the placement that needs no classifier —
+  a line whose every preceding character is whitespace or comment punctuation.
+  Markers are no longer read out of generated, vendored or minified content at
+  all: that text had no author who could have meant it. And the reason itself is
+  now redacted against the credential patterns before it is quoted. A reason runs
+  to the end of its line, so a marker written just before a connection string
+  harvested the password verbatim onto a signed receipt and synced it to the
+  hosted database — the secret scanner's promise that values never leave it now
+  holds for the text other passes copy out of the repository too.
+
+- **Oversized-file findings counted comments as code.** The size analyzer
+  measured non-blank lines and then printed the number as a fact: "parser.ts has
+  2202 lines of code", in a document a customer can disprove with `wc`. Two of
+  this repository's own HIGH findings existed only because of it — the same two
+  files measure 1995 and 1996 lines of code, both below the threshold that made
+  them HIGH — and the overcount inflated every oversized finding, because the
+  800-line gate read the same number. Both the gate and the printed number now
+  come from the classifier. Nothing stops being reported that a refactor would
+  have helped: a file with 800 lines of code has 800 lines of code however they
+  are counted. What stops is documentation manufacturing severity.
+
+- **Redirects that are not redirect calls are now findings.** The open-redirect
+  rule matched two method names, `redirect` and `sendRedirect`. Most navigation
+  in a React or Next.js codebase is neither: it is `<Link href={returnTo}>`,
+  `<form action={next}>`, `location.href = next`, `location.assign(...)` or
+  `router.push(...)`, and none of those is a call to anything the rule was
+  looking for. It missed a live open redirect in our own repository on that
+  basis. Those shapes are sinks now. The call forms are gated on their receiver,
+  because `push` and `replace` unqualified are `Array.prototype.push` and
+  `String.prototype.replace`; the binding forms fire only where the untrusted
+  value IS the navigation target — a value, or a field of the request itself —
+  because reading taint off a record that a route segment merely looked up turns
+  every call-to-action on a `[slug]` page into an open redirect. Measured against
+  this repository, the narrow rule adds the real defect plus two links a reviewer
+  should confirm; the wide one added five more that no reviewer should have to.
+
 ## 0.2.44 — 2026-08-07
 
 - **The person you hand a receipt to can now check it.** Until this release a

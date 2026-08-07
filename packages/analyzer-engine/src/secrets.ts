@@ -22,6 +22,29 @@ const SECRET_PATTERNS: Array<{ name: string; re: RegExp }> = [
   { name: 'Database URL with credentials', re: /(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/([^\s'":@/]+):([^\s'"@]+)@([^\s'"/]+)/ },
 ]
 
+/** {@link SECRET_PATTERNS} as global matchers, for replacing every occurrence. */
+const REDACTION_PATTERNS = SECRET_PATTERNS.map(({ name, re }) => ({
+  name,
+  re: new RegExp(re.source, `${re.flags}g`),
+}))
+
+/**
+ * Replace anything credential-shaped in free text with its credential TYPE.
+ *
+ * This module's contract is that values never leave it. Text harvested from the
+ * repository and quoted onto a signed receipt is bound by the same contract even
+ * when another pass harvests it — a `codetruss-ignore` reason runs to the end of
+ * its physical line, so on a one-line file the marker swallows whatever follows
+ * it. Redacting is preferred to dropping the text: the reason is the entire
+ * evidentiary output of the marker, and a receipt that says only "dismissed" has
+ * lost the thing that made the dismissal auditable.
+ */
+export function redactSecrets(text: string): string {
+  let out = text
+  for (const { name, re } of REDACTION_PATTERNS) out = out.replace(re, `[redacted ${name}]`)
+  return out
+}
+
 const SKIP_FILES = /(\.env\.example|\.md|\.lock|package-lock\.json|pnpm-lock\.yaml)$/i
 const PLACEHOLDER = /(example|placeholder|your[-_]|xxx|changeme|dummy|<[^>]+>|\$\{)/i
 /**
