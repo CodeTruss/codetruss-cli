@@ -48,7 +48,18 @@ dependencies. The shell installers resolve a versioned artifact and verify its
 published SHA-256 digest before installation. Every release also includes a
 deterministic CycloneDX SBOM, changelog, and security policy.
 
-Deterministic `run`, `review`, `report`, `list`, `metrics`, `init`, `verify`, and hook
+`codetruss verify latest` re-checks a receipt against the signing keys this
+repository trusts. Anyone you hand a receipt to has no such key, so
+`codetruss verify-receipt <receipt.json|dir>` checks it for them, outside any
+repository, and reports two claims it never merges: **integrity** — these bytes
+have not changed since they were signed — established from the receipt alone, and
+**provenance** — a party you trust signed them — established only against a
+`--public-key` obtained from that party out of band. A receipt vouching for its
+own key proves nothing about who wrote it, so a run without a supplied key exits
+`1` (intact but unattributed); altered bytes exit `2`.
+
+Deterministic `run`, `review`, `report`, `list`, `metrics`, `init`, `verify`,
+`verify-receipt`, and hook
 checks run on-machine without contacting CodeTruss. Installation fetches release
 metadata and package bytes from CodeTruss. `auth login` contacts CodeTruss
 device/session endpoints but uploads no source, patch, or receipt. `auth status`
@@ -56,10 +67,12 @@ contacts the session endpoint to verify the saved credential, and `auth logout`
 contacts it to revoke the credential before deleting the local copy; neither
 sends source, patches, or receipts. `--llm --provider anthropic|openai|claude`
 opts into provider review using your API key or authenticated local Claude Code.
-Local receipts identify the 15-pass `local-registry-v3` profile and show hosted
-Health scores as N/A. The hosted symbol graph and the full SAST rule pack run
-only in the hosted full audit, so the CLI never infers a complete score from its
-smaller local pass set.
+Local receipts identify the 15-pass `local-registry-v4` profile and show hosted
+Health scores as N/A. Its local security pass covers JavaScript, TypeScript, and
+TSX, plus Python when the optional grammar pack is installed; each receipt states
+which of those actually ran rather than assuming. The hosted symbol graph and the
+full SAST rule pack run only in the hosted full audit, so the CLI never infers a
+complete score from its smaller local pass set.
 CodeTruss supplies a bounded task, reviewed diff prefix, and fixed review schema;
 the provider client may add its own runtime instructions or metadata. The receipt
 discloses reviewed versus total diff bytes, and truncation prevents `PASS`.

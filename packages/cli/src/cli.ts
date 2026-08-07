@@ -53,6 +53,7 @@ import { CLI_VERSION } from './version.js'
 import { assertLocalEvidencePathsIgnored, ensureLocalEvidenceProtected } from './local-evidence.js'
 import { guidedSetup } from './setup.js'
 import { runGrammarsCommand } from './grammar-command.js'
+import { runVerifyReceiptCommand } from './verify-receipt-command.js'
 
 interface Parsed { command: string; positionals: string[]; values: Map<string, string[]>; booleans: Set<string>; agent: string[] }
 
@@ -75,6 +76,7 @@ const COMMAND_OPTION_SCHEMAS: Readonly<Record<string, CommandOptionSchema>> = {
   list: { booleans: ['json'], maxPositionals: 0, agent: 'forbidden' },
   metrics: { booleans: ['json'], maxPositionals: 0, agent: 'forbidden' },
   verify: { maxPositionals: 1, agent: 'forbidden' },
+  'verify-receipt': { values: ['public-key'], maxPositionals: 1, agent: 'forbidden' },
   'verify-policy': { maxPositionals: 1, agent: 'forbidden' },
   sync: { booleans: ['dry-run'], maxPositionals: 1, agent: 'forbidden' },
   hooks: { maxPositionals: 2, agent: 'forbidden' },
@@ -312,13 +314,19 @@ Usage:
   codetruss setup [--allow GLOB] [--deny GLOB] [--hooks all|pre-commit|claude|codex|none] [--trust-verify] [--yes]
   codetruss init [--allow GLOB] [--deny GLOB] [--force]
   codetruss verify [id|latest]
+  codetruss verify-receipt <receipt.json|dir> [--public-key FILE]
   codetruss sync [id|latest] [--dry-run]
   codetruss auth login|status|logout
   codetruss verify-policy [status|trust|trust-key|revoke]
   codetruss hooks install|status|doctor|uninstall [pre-commit|claude|codex|all]
   codetruss grammars list|status|install|uninstall [python]
 
-Exit codes: PASS=0, REVIEW_REQUIRED=1, FAILED=2, usage/environment=3.`
+verify checks a receipt this repository's own trusted key signed. verify-receipt
+checks one you were handed: it establishes integrity from the receipt itself, and
+provenance only against a --public-key you obtained from the signer out of band.
+
+Exit codes: PASS=0, REVIEW_REQUIRED=1, FAILED=2, usage/environment=3.
+verify-receipt: integrity and provenance=0, intact but unattributed=1, not intact=2.`
 }
 
 async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig): Promise<number> {
@@ -729,6 +737,14 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   // outside a git checkout is a legitimate thing to do.
   if (parsed.command === 'grammars') {
     return runGrammarsCommand(parsed.positionals[0] ?? 'status', parsed.positionals[1])
+  }
+  // Checking a receipt someone handed you is not a repository operation: the
+  // reader may hold nothing but the receipt, and requiring a checkout would put
+  // them back where they started.
+  if (parsed.command === 'verify-receipt') {
+    const target = parsed.positionals[0]
+    if (!target) throw new Error('verify-receipt requires the path to a receipt .json file (or the directory holding it)')
+    return runVerifyReceiptCommand(target, many(parsed, 'public-key', []))
   }
   const root = findRepoRoot()
   if (parsed.command === 'setup') {
