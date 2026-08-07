@@ -61,8 +61,26 @@ if [ ! -x "$EXECUTABLE" ]; then
 fi
 
 "$EXECUTABLE" --version
-if ! command -v codetruss >/dev/null 2>&1; then
+
+# `command -v codetruss` succeeding is not the same as it being the binary just
+# installed: an older install earlier in PATH shadows this one, and the hooks
+# invoke `codetruss` by name. Compare the resolved targets before saying Ready.
+real_path() {
+  node -e 'const fs = require("node:fs"); const p = process.argv[1]; try { process.stdout.write(fs.realpathSync(p)) } catch { process.stdout.write(p) }' "$1"
+}
+
+RESOLVED="$(command -v codetruss 2>/dev/null || true)"
+if [ -z "$RESOLVED" ]; then
   printf 'Add %s/bin to PATH, then run: codetruss setup\n' "$PREFIX"
-else
-  printf '%s\n' 'Ready. Run inside your Git repository: codetruss setup'
+  exit 0
 fi
+
+RESOLVED_TARGET="$(real_path "$RESOLVED")"
+INSTALLED_TARGET="$(real_path "$EXECUTABLE")"
+if [ "$RESOLVED_TARGET" != "$INSTALLED_TARGET" ]; then
+  printf 'Warning: `codetruss` on your PATH is %s, not the install that just completed at %s.\n' "$RESOLVED" "$EXECUTABLE" >&2
+  printf 'Running `codetruss` would use the older one. Put %s/bin ahead of it in PATH (or remove the shadowing install), then run: codetruss setup\n' "$PREFIX" >&2
+  exit 0
+fi
+
+printf '%s\n' 'Ready. Run inside your Git repository: codetruss setup'

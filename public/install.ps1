@@ -75,5 +75,42 @@ if (-not $Command) {
   exit 0
 }
 
+# `Get-Command codetruss` succeeding is not the same as it being the binary just
+# installed: an older install earlier in PATH shadows this one, and the hooks
+# invoke `codetruss` by name. Compare where PATH resolves it against npm's global
+# prefix. On Windows the shims land directly in the prefix (no bin/ subdirectory),
+# so compare the directory rather than an exact file name.
+function Get-NormalizedPath {
+  param([string]$Path)
+  if (-not $Path) { return $null }
+  $Trimmed = $Path.Trim()
+  if (-not $Trimmed) { return $null }
+  try {
+    return ([System.IO.Path]::GetFullPath($Trimmed)).TrimEnd([char[]]('\', '/'))
+  } catch {
+    return $Trimmed.TrimEnd([char[]]('\', '/'))
+  }
+}
+
+$Prefix = if ($env:NPM_CONFIG_PREFIX) {
+  $env:NPM_CONFIG_PREFIX
+} else {
+  (& npm prefix --global | Select-Object -First 1)
+}
+if ($Prefix) { $Prefix = $Prefix.Trim() }
+
+# ApplicationInfo (.cmd) and ExternalScriptInfo (.ps1) both expose the full path
+# on .Source; fall back to .Path, and skip the check if neither is present.
+$ResolvedPath = if ($Command.Source) { $Command.Source } else { $Command.Path }
+if ($Prefix -and $ResolvedPath) {
+  $InstalledDir = Get-NormalizedPath $Prefix
+  $ResolvedDir = Get-NormalizedPath (Split-Path -Parent $ResolvedPath)
+  if ($InstalledDir -and $ResolvedDir -and ($InstalledDir -ine $ResolvedDir)) {
+    Write-Warning "codetruss on your PATH resolves to $ResolvedPath, not the install that just completed in $Prefix."
+    Write-Host "Running codetruss would use that one instead. Put $Prefix ahead of it in PATH (or remove the shadowing install), then run: codetruss setup"
+    exit 0
+  }
+}
+
 & codetruss --version
 Write-Host "Ready. Run inside your Git repository: codetruss setup"
