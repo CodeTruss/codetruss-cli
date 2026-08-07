@@ -1,10 +1,15 @@
 import type { AnalyzerFinding, AnalyzerPass, RepoIndex } from '@codetruss/analyzer-engine'
-import { mergeSastResults, scanFiles, type ScanInput } from '@codetruss/analyzer-engine/security/engine'
+import {
+  mergeSastResults,
+  scanFiles,
+  timeCeilingDisclosure,
+  type ScanInput,
+} from '@codetruss/analyzer-engine/security/engine'
 import { zeroDependencyJsParser } from '@codetruss/analyzer-engine/security/js-parse/index'
 import { mapSastFinding } from '@codetruss/analyzer-engine/security/finding-map'
 import { CLI_SAST_RULE_IDS } from '@codetruss/analyzer-engine/security/local-profile'
 import { sastLanguageForPath, type SastLanguage } from '@codetruss/analyzer-engine/security/lang'
-import type { SastResult } from '@codetruss/analyzer-engine/security/types'
+import type { SastDiagnostics, SastResult } from '@codetruss/analyzer-engine/security/types'
 import { loadGrammarParser } from './grammar-parser.js'
 
 /**
@@ -97,9 +102,53 @@ export type PythonCoverageStatus = 'not-applicable' | 'absent' | 'verified' | 'f
  */
 export type PythonPackFailureKind = 'digest' | 'runtime' | 'scan'
 
+/**
+ * Where this run's security evidence has a HOLE — files whose rules did not all
+ * run, because a wall-clock ceiling cut the file short or the pass ended before
+ * reaching it.
+ *
+ * Distinct from an analyzer's withheld set, and the difference is the whole
+ * point. A withheld finding was FOUND and then dropped to respect an output cap,
+ * so it can be handed to the delta as evidence of what a tree contained. A file
+ * a clock cut was never analyzed: there is no finding to hand over, and the
+ * tree's state there is unknown rather than clean. Only the paths can be
+ * carried, so the delta knows which claims it has no basis to make.
+ */
+export interface SastCoverageGap {
+  /** Files whose security evidence is incomplete in this tree. */
+  paths: string[]
+  /**
+   * More files were cut than the diagnostics could name, so {@link paths} does
+   * not identify them all. Reachable whenever the whole-pass ceiling fires: it
+   * skips every remaining file, and only the first 50 are named. No SAST finding
+   * can be attributed to a change on a run like that.
+   */
+  incomplete: boolean
+}
+
+/**
+ * Read the gap out of a completed scan's diagnostics.
+ *
+ * The counts are authoritative and the path lists are bounded, so a run that cut
+ * more files than it could name is reported as `incomplete` rather than
+ * pretending the names it does have are the whole set.
+ */
+export function sastCoverageGap(diagnostics: SastDiagnostics): SastCoverageGap {
+  const capped = diagnostics.timeCappedPaths ?? []
+  const skipped = diagnostics.timeSkippedPaths ?? []
+  return {
+    paths: [...capped, ...skipped],
+    incomplete:
+      (diagnostics.timeCappedFiles ?? 0) > capped.length ||
+      (diagnostics.timeSkippedFiles ?? 0) > skipped.length,
+  }
+}
+
 export interface LocalSastResult {
   findings: AnalyzerFinding[]
   pass: AnalyzerPass
+  /** Files this run could not fully analyze. Empty and complete on a clean run. */
+  coverageGap: SastCoverageGap
 }
 
 const EMPTY_SCAN: SastResult = {
@@ -179,13 +228,25 @@ export async function runLocalSast(index: RepoIndex, env: NodeJS.ProcessEnv = pr
   const details = [
     jsError ? `the JavaScript pass failed: ${jsError}` : undefined,
     pythonError,
-    truncated ? `${diagnostics.filesSkipped} file(s) could not be parsed locally and were not analyzed` : undefined,
+    // Gated on the count it quotes: truncation now has more than one cause, and
+    // "0 file(s) could not be parsed" on a run where the clock was the limit
+    // would be a false sentence on a signed document.
+    diagnostics.filesSkipped > 0
+      ? `${diagnostics.filesSkipped} file(s) could not be parsed locally and were not analyzed`
+      : undefined,
+    // Named, never merely counted: a file the clock cut short is missing
+    // evidence, and the receipt has to say which file rather than let a shorter
+    // finding list read as a cleaner repository.
+    timeCeilingDisclosure(diagnostics),
   ].filter((entry): entry is string => Boolean(entry))
 
   const error = jsError ?? pythonError
 
   return {
     findings,
+    // Carried so the baseline/final delta can refuse to attribute anything
+    // either tree could not see.
+    coverageGap: sastCoverageGap(diagnostics),
     pass: {
       id: LOCAL_SAST_PASS_ID,
       result: {

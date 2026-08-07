@@ -88,6 +88,48 @@ describe('verification command lifecycle', () => {
     }
   })
 
+  it('settles on the command exit status when an escaped process holds its pipes', async () => {
+    const root = await temporaryDirectory()
+    const descendantScript = join(root, 'holder-descendant.cjs')
+    const parentScript = join(root, 'holder-parent.cjs')
+    const sentinel = join(root, 'holder-descendant.keepalive')
+    await writeFile(sentinel, '')
+    // The same escape the case above records, seen from the other end: this
+    // descendant survives cleanup on every platform — POSIX because `detached`
+    // makes it its own session leader, Windows because it outlives the leader
+    // taskkill would have had to enumerate it from — and it holds the pipes it
+    // inherited, which is what `close` waits for. The run must not wait with
+    // it: the command itself finished, and reporting a timeout instead of its
+    // exit status would fail a verification that passed. Cleanup still never
+    // signals the recorded pid (Windows recycles a freed pid within
+    // milliseconds); the descendant exits once the sentinel disappears, and it
+    // runs outside the temporary directory so the afterEach can remove it.
+    await writeFile(descendantScript, [
+      "const { existsSync } = require('node:fs')",
+      `const sentinel = ${JSON.stringify(sentinel)}`,
+      'setInterval(() => { if (!existsSync(sentinel)) process.exit(0) }, 100)',
+    ].join('\n'))
+    await writeFile(parentScript, [
+      "const { spawn } = require('node:child_process')",
+      `spawn(process.execPath, [${JSON.stringify(descendantScript)}], { cwd: ${JSON.stringify(tmpdir())}, detached: true, stdio: ['ignore', 'inherit', 'inherit'] }).unref()`,
+      "process.stdout.write('command-finished\\n')",
+    ].join(';'))
+
+    try {
+      // The deadline outlasts this test's own budget on purpose: a run that
+      // went back to waiting for `close` fails on the Vitest timeout rather
+      // than passing slowly.
+      const result = await runVerification(nodeCommand(parentScript), root, 1_024, process.env, 60_000)
+
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toContain('command-finished')
+      expect(result.output).toContain('CodeTruss stopped capturing 2000ms after the command exited')
+      expect(result.durationMs).toBeLessThan(10_000)
+    } finally {
+      await rm(sentinel, { force: true })
+    }
+  }, 20_000)
+
   it.runIf(process.platform !== 'win32')('terminates descendants in the verification process group', async () => {
     const root = await temporaryDirectory()
     const descendantScript = join(root, 'descendant.cjs')

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -75,6 +75,49 @@ describe('local provider process isolation', () => {
     expect(failure).toBeInstanceOf(LocalCommandError)
     expect(failure).toMatchObject({ reason: 'output-limit' })
   })
+
+  it('returns the provider result when an escaped helper holds its pipes', async () => {
+    const cwd = await temporaryDirectory()
+    const descendantScript = join(cwd, 'holder-descendant.cjs')
+    const providerScript = join(cwd, 'holder-provider.cjs')
+    const sentinel = join(cwd, 'holder-descendant.keepalive')
+    await writeFile(sentinel, '')
+    // A provider that forks a helper it does not wait for: the helper escapes
+    // cleanup on every platform — POSIX because `detached` makes it its own
+    // session leader, Windows because it outlives the leader taskkill would
+    // have had to enumerate it from — and keeps the inherited pipes, and
+    // therefore `close`, open. The review the provider already printed must
+    // still be returned rather than discarded as a deadline failure. Cleanup
+    // never signals the recorded pid (Windows recycles a freed pid within
+    // milliseconds); the helper exits once the sentinel disappears, and it
+    // runs outside the temporary directory so the afterEach can remove it.
+    await writeFile(descendantScript, [
+      "const { existsSync } = require('node:fs')",
+      `const sentinel = ${JSON.stringify(sentinel)}`,
+      'setInterval(() => { if (!existsSync(sentinel)) process.exit(0) }, 100)',
+    ].join('\n'))
+    await writeFile(providerScript, [
+      "const { spawn } = require('node:child_process')",
+      `spawn(process.execPath, [${JSON.stringify(descendantScript)}], { cwd: ${JSON.stringify(tmpdir())}, detached: true, stdio: ['ignore', 'inherit', 'inherit'] }).unref()`,
+      "process.stdout.write('REVIEW_COMPLETE')",
+    ].join(';'))
+
+    try {
+      // The deadline outlasts this test's own budget on purpose: a call that
+      // went back to waiting for `close` fails on the Vitest timeout rather
+      // than passing slowly.
+      const result = await runLocalCommand({
+        command: process.execPath,
+        args: [providerScript],
+        cwd,
+        timeoutMs: 60_000,
+      })
+
+      expect(result).toMatchObject({ stdout: 'REVIEW_COMPLETE', exitCode: 0, signal: null })
+    } finally {
+      await rm(sentinel, { force: true })
+    }
+  }, 20_000)
 
   it.runIf(process.platform !== 'win32')('cleans up descendants after the command exits', async () => {
     const cwd = await temporaryDirectory()

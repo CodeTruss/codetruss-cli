@@ -40,6 +40,7 @@ function verdictInput(findings: AnalyzerFinding[]) {
 function analysis(findings: AnalyzerFinding[]) {
   return {
     findings,
+    withheld: [],
     passes: [{ id: 'secrets', result: { findings, complete: true } }],
     index: { totalLoc: 10, languages: { TypeScript: 10 }, primaryLanguage: 'TypeScript' } as unknown as RepoIndex,
   }

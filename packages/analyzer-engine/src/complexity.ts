@@ -154,6 +154,10 @@ export const complexityAnalyzer: Analyzer = {
 
     const findingLimit = 20
     const output = findings.slice(0, findingLimit)
+    // Handed to the runner, never reported: proof that this tree already
+    // contained them, so a comparison cannot read one entering a freed cap slot
+    // as a finding the change introduced.
+    const withheld = findings.slice(findingLimit)
     // Only the candidate-file cap loses coverage. The finding cap bounds the
     // persisted/displayed output after every candidate was analyzed, so it must
     // not make otherwise authoritative scores disappear.
@@ -162,13 +166,13 @@ export const complexityAnalyzer: Analyzer = {
         truncated: true,
         detail: `Complexity analysis hit a candidate bound (${candidates.length} candidate files, ${findings.length} matches).`,
         metrics: { candidates: candidates.length, candidateLimit, matches: findings.length, findingLimit },
-      })
+      }, withheld)
     }
     if (findings.length > findingLimit) {
       return annotatedAnalyzerOutput(output, {
         detail: `Complexity output capped at ${findingLimit} of ${findings.length} matches.`,
         metrics: { candidates: candidates.length, candidateLimit, matches: findings.length, findingLimit },
-      })
+      }, withheld)
     }
     return output
   },

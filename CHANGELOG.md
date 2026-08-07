@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.41 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.41),
+The current public release is [v0.2.42 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.42),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 The npm `latest` tag is still
 [`@codetruss/cli@0.2.24`](https://www.npmjs.com/package/@codetruss/cli/v/0.2.24):
@@ -15,6 +15,58 @@ were superseded before distribution.
 ## Unreleased
 
 No unreleased changes.
+
+## 0.2.42 — 2026-08-07
+
+- **A security scan that could have run for hours now finishes in seconds.**
+  Naming the callee of a chained call went the long way round, through a helper
+  that eagerly re-derived that same name twice more — so a left-deep method chain
+  cost 3^links to analyze. Eighteen chained `.replace()` calls in a single 19 KB
+  file extrapolated to roughly 2.1 hours, and a thirteen-link chain took
+  30,839 ms; that chain now takes 2 ms. Only the number of times the name is
+  computed changed, never the answer. Two wall-clock ceilings back that up —
+  five seconds for one file, five minutes for a whole pass — so no future shape
+  can hang a scan instead of finishing it. A ceiling that fires is disclosed
+  rather than absorbed: the receipt names the files it cut and says plainly that
+  the rules which had not run there reported nothing, which is not the same as
+  finding nothing.
+- **A finding in a file your change never touched is no longer reported as one
+  your change introduced.** Analyzers cap how many findings they report. Resolve
+  two and two cap slots free up, so findings that had merely been hidden in
+  untouched files entered the reported list for the first time — where the
+  baseline comparison called them introduced, and a signed receipt then asserted
+  that a change broke code its author never opened. The mirror image was just as
+  wrong: a finding pushed below the cap read as resolved when nothing had fixed
+  it. The comparison now runs over everything each pass found rather than only
+  what it reported, while the cap still decides what a receipt shows. The new
+  time ceilings above can hide a finding the same way, and that door is shut
+  too — but by the opposite means, because a capped finding was found and then
+  dropped whereas a file the clock cut was never analyzed at all. There is
+  nothing to recover in that case, so a file either the baseline or the final
+  could not finish is dropped from both sides, and the comparison makes no claim
+  about it in either direction.
+- **A verification that passed is no longer reported as timed out because
+  something it started outlived it.** On Windows a descendant that escapes the
+  process tree keeps the inherited output pipes open, and CodeTruss waited on
+  those pipes — so a suite that passed in ten seconds and left a watcher behind
+  burned its entire deadline and produced exit code 124 on a signed receipt. A
+  local review provider lost finished reviews the same way. Capture now settles
+  two seconds after the command's own process exits, on the status the command
+  actually produced, and the escape is named in the output instead of being
+  absorbed silently. That grace is only ever paid when something really did
+  escape. What Windows still does not allow CodeTruss to reap, and what closing
+  it would cost, is stated in the code at the point the choice is made.
+- **CodeTruss no longer reads its own receipts back in as your source code.** A
+  receipt `.patch` is the captured session diff — the full text of every changed
+  line — and it classified as source, so the tool analyzed its own audit trail.
+  Against this repository's real 156-receipt store that produced 52 spurious
+  findings, including duplication findings over receipts that repeat each other
+  by construction; those consumed the per-analyzer finding budgets and crowded
+  genuine findings out of the report entirely. It also ran the other way: an
+  identifier appearing anywhere in a receipt looked referenced, so "exported with
+  no consumer" findings silently vanished and returned depending on what the last
+  session happened to touch. A repository holding receipts now yields the same
+  findings as the same tree with no receipts in it at all.
 
 ## 0.2.41 — 2026-08-07
 

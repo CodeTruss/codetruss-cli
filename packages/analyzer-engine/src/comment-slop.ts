@@ -337,7 +337,6 @@ export const commentSlopAnalyzer: Analyzer = {
     const isDensityOutlier = (item: FileMeasurement) =>
       item.ratio >= densityThreshold && item.commentLines >= DENSITY_MIN_COMMENTS
 
-    const findings: AnalyzerFinding[] = []
     const restating = measurements
       .filter((item) => item.redundant.length >= REDUNDANT_FILE_THRESHOLD)
       .sort((left, right) => right.redundant.length - left.redundant.length)
@@ -346,11 +345,15 @@ export const commentSlopAnalyzer: Analyzer = {
       .sort((left, right) => right.narration.length - left.narration.length)
 
     const findingLimit = 10
-    for (const item of restating.slice(0, findingLimit)) {
+    // Built for every matching file, then split by the cap into reported and
+    // withheld. A finding that is never constructed cannot be compared against
+    // another run, and the delta then reads it as introduced the first time a
+    // cap slot frees up — see `analyzerWithheld` in types.ts.
+    const restatingFindings: AnalyzerFinding[] = restating.map((item) => {
       const outlier = isDensityOutlier(item)
       const low = item.redundant.length >= REDUNDANT_LOW_THRESHOLD && outlier
       const sample = item.redundant[0]
-      findings.push({
+      return {
         category: 'DOCUMENTATION',
         severity: low ? 'LOW' : 'INFO',
         title: `${item.redundant.length} comments restate the code in ${item.path}`,
@@ -368,15 +371,15 @@ export const commentSlopAnalyzer: Analyzer = {
         impactScore: low ? 25 : 15,
         effort: 'low',
         metadata: { count: item.redundant.length, sample: item.redundant.slice(0, 5) },
-      })
-    }
+      }
+    })
 
-    for (const item of narrating.slice(0, findingLimit)) {
+    const narratingFindings: AnalyzerFinding[] = narrating.map((item) => {
       const low = item.narration.length >= NARRATION_LOW_THRESHOLD
       const sample = item.narration[0]
       const others = item.narration.length - 1
       const allPlaceholder = item.narration.every((hit) => hit.tag === 'placeholder-deferral')
-      findings.push({
+      return {
         category: 'DOCUMENTATION',
         severity: low ? 'LOW' : 'INFO',
         title: allPlaceholder
@@ -399,8 +402,17 @@ export const commentSlopAnalyzer: Analyzer = {
         impactScore: low ? 25 : 15,
         effort: 'low',
         metadata: { count: item.narration.length, sample: item.narration.slice(0, 5) },
-      })
-    }
+      }
+    })
+
+    const findings = [
+      ...restatingFindings.slice(0, findingLimit),
+      ...narratingFindings.slice(0, findingLimit),
+    ]
+    const withheld = [
+      ...restatingFindings.slice(findingLimit),
+      ...narratingFindings.slice(findingLimit),
+    ]
 
     const metrics = {
       eligibleFiles: measurements.length,
@@ -420,13 +432,13 @@ export const commentSlopAnalyzer: Analyzer = {
         truncated: true,
         detail: `Comment analysis hit a candidate bound (${candidates.length} candidate files).`,
         metrics: { ...metrics, candidates: candidates.length, candidateLimit },
-      })
+      }, withheld)
     }
     if (restating.length > findingLimit || narrating.length > findingLimit) {
       return annotatedAnalyzerOutput(findings, {
         detail: `Comment output capped at ${findingLimit} files per rule (${restating.length} restating, ${narrating.length} narrating).`,
         metrics: { ...metrics, candidates: candidates.length, candidateLimit },
-      })
+      }, withheld)
     }
     return annotatedAnalyzerOutput(findings, {
       metrics: { ...metrics, candidates: candidates.length, candidateLimit },

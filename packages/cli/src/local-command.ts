@@ -2,6 +2,17 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 
 export const LOCAL_COMMAND_MAX_OUTPUT_BYTES = 2_000_000
 
+/**
+ * How long a call keeps capturing after the provider's own process has exited.
+ *
+ * Mirrors the verification grace in git.ts, for the same reason: a provider can
+ * leave a helper holding the stdio pipes it inherited, `close` waits on those
+ * pipes, and a helper that escaped the process group cannot always be
+ * terminated (see terminateProcessTree). Without a bound, a review the provider
+ * already finished and printed would be discarded as a timeout.
+ */
+const LOCAL_COMMAND_ESCAPED_OUTPUT_GRACE_MS = 2_000
+
 export type LocalCommandFailureReason = 'spawn' | 'timeout' | 'output-limit'
 
 export class LocalCommandError extends Error {
@@ -62,6 +73,16 @@ async function terminateProcessTree(child: ChildProcess): Promise<void> {
     // process. The liveness check uses our own process handle and cannot be
     // misdirected; a leader exiting between this check and taskkill's own
     // snapshot is the same narrow race every taskkill user carries.
+    //
+    // KNOWN LIMIT — a descendant that outlives the leader is not reaped here,
+    // and cannot be: Windows leaves a dead parent id behind rather than
+    // reparenting, so the chain from this pid to that descendant no longer
+    // exists to walk, and matching on the stale parent id would be
+    // pid-recycling roulette by another name. Containment that survives
+    // ancestor death needs a kernel job object (KILL_ON_JOB_CLOSE), for which
+    // Node has no API and this CLI ships no native addon or helper binary. The
+    // escape is bounded instead of prevented — see
+    // LOCAL_COMMAND_ESCAPED_OUTPUT_GRACE_MS.
     if (child.exitCode !== null || child.signalCode !== null) return
     spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], {
       stdio: 'ignore',
@@ -104,15 +125,39 @@ export function runLocalCommand(request: LocalCommandRequest): Promise<LocalComm
     let failure: LocalCommandError | undefined
     let settled = false
     let cleanupPromise: Promise<void> | undefined
+    let escapeTimer: NodeJS.Timeout | undefined
 
     const cleanup = () => {
       cleanupPromise ??= terminateProcessTree(child)
       return cleanupPromise
     }
+    const succeed = (exitCode: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(timer)
+      clearTimeout(escapeTimer)
+      child.stdin.destroy()
+      void cleanup().finally(() => {
+        child.stdout.destroy()
+        child.stderr.destroy()
+        child.unref()
+        if (settled) return
+        settled = true
+        if (failure) {
+          reject(failure)
+          return
+        }
+        resolve({
+          stdout: Buffer.concat(stdout).toString('utf8'),
+          stderr: Buffer.concat(stderr).toString('utf8'),
+          exitCode,
+          signal,
+        })
+      })
+    }
     const fail = (reason: LocalCommandFailureReason) => {
       if (failure) return
       failure = new LocalCommandError(request.command, reason, reason === 'timeout' ? request.timeoutMs : undefined)
       clearTimeout(timer)
+      clearTimeout(escapeTimer)
       child.stdin.destroy()
       void cleanup().finally(() => {
         child.stdout.destroy()
@@ -147,29 +192,21 @@ export function runLocalCommand(request: LocalCommandRequest): Promise<LocalComm
       fail('spawn')
     })
 
-    child.once('exit', () => {
+    child.once('exit', (exitCode, signal) => {
       // A provider must not leave background descendants running after review.
       void cleanup()
+      // A helper that escaped that terminate still holds the pipes it
+      // inherited, which is what `close` waits for. Settle on the provider's
+      // own exit status after a bounded grace rather than discarding a review
+      // it already produced once the deadline elapses.
+      escapeTimer = setTimeout(() => {
+        if (settled || failure) return
+        succeed(exitCode, signal)
+      }, LOCAL_COMMAND_ESCAPED_OUTPUT_GRACE_MS)
+      escapeTimer.unref()
     })
 
-    child.once('close', (exitCode, signal) => {
-      clearTimeout(timer)
-      child.stdin.destroy()
-      void cleanup().finally(() => {
-        if (settled) return
-        settled = true
-        if (failure) {
-          reject(failure)
-          return
-        }
-        resolve({
-          stdout: Buffer.concat(stdout).toString('utf8'),
-          stderr: Buffer.concat(stderr).toString('utf8'),
-          exitCode,
-          signal,
-        })
-      })
-    })
+    child.once('close', (exitCode, signal) => succeed(exitCode, signal))
 
     child.stdin.end(request.input ?? '')
   })

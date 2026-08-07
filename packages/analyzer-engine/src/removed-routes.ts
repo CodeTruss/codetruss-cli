@@ -68,10 +68,12 @@ export const removedRoutesAnalyzer: Analyzer = {
     }
 
     if (findings.length > FINDING_LIMIT) {
+      // The over-cap prefixes ride along unreported so a comparison against
+      // another run can tell "was already here, just not shown" from "is new".
       return annotatedAnalyzerOutput(findings.slice(0, FINDING_LIMIT), {
         detail: `Removed-route output capped at ${FINDING_LIMIT} of ${findings.length} prefixes.`,
         metrics: { prefixes: findings.length, findingLimit: FINDING_LIMIT },
-      })
+      }, findings.slice(FINDING_LIMIT))
     }
     return findings
   },
