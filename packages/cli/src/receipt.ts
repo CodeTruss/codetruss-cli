@@ -103,11 +103,50 @@ function analysisProfileLines(receipt: Receipt): string[] {
     ]
   }
   if (current.id === 'local-registry-v1') return omittedSastProfileLines(receipt, current.id)
+  if (current.id === 'local-registry-v2') return thirteenAnalyzerProfileLines(receipt, current.id)
 
   return [
     '## Analysis profile',
     '',
     `Profile: \`${current.id}\`.`,
+    '',
+    'The 15 deterministic registry analyzers ran locally on this machine, plus a local security pass: the shared SAST engine — the same rules and the same source-to-sink taint tracking as the hosted audit — over the JavaScript, TypeScript and TSX in this repository.',
+    '',
+    '### What the local security pass checked',
+    '',
+    '- **SQL injection (CWE-89).** Untrusted input tracked from request sources through string building into query execution.',
+    '- **Mass assignment (CWE-915).** A raw request body spread into a database write, and write helpers whose payload type accepts arbitrary keys.',
+    '- **Un-awaited database writes, swallowed errors, coercion-prone `==` comparisons, and N+1 queries in loops** — the defect classes coding agents most often introduce.',
+    '',
+    '### What did not run',
+    '',
+    '- **The rest of the security rule pack.** Command injection, code injection, path traversal, SSRF, open redirect, XSS and insecure deserialization were **not** checked here. Those rules run in a hosted scan; absence of a finding in those classes means they were not analyzed, not that the code is clean.',
+    '- **Non-JavaScript languages.** The local pass covers JavaScript, TypeScript and TSX only. Python, Go, Java, C#, PHP, Ruby and Rust in this repository received secret scanning and the other registry passes, but no security rule or taint analysis.',
+    '- **Hosted symbol graph.** No cross-file call or data-flow graph was built, so architecture and dead-code conclusions cover only what the local passes can see in isolation.',
+    '- **Abstraction-shape analysis.** Single-implementation interfaces, options nobody overrides, and parameters never varied at any call site were not checked. They require the cross-file symbol graph, which does not run locally. This receipt says nothing either way about those shapes.',
+    ...(receipt.llm ? [] : [
+      '- **Optional LLM review.** No model read this diff. It is opt-in via `--llm` and is force-disabled under agent hooks, so a hook receipt is always deterministic evidence only.',
+    ]),
+    '- **Hosted Health scores.** Not calculated, reported as **N/A**. The scores are defined over the graph and the complete SAST pass; a number derived from this pass set would overstate what ran.',
+    '',
+    'Local security findings are reported for review and do not fail the verdict on their own.',
+    '',
+    'A PASS verdict means the passes listed above never ran and the passes that did run found nothing new. It is not a statement that this change is secure.',
+    '',
+    '[Run a hosted full audit](https://codetruss.com/dashboard/repos/new?source=cli-receipt).',
+  ]
+}
+
+/**
+ * The profile block exactly as CLI 0.2.35–0.2.38 wrote it, when the registry
+ * held thirteen analyzers and abstraction shape was not disclosed. Frozen so
+ * those receipts still reproduce byte-for-byte.
+ */
+function thirteenAnalyzerProfileLines(receipt: Receipt, profileId: string): string[] {
+  return [
+    '## Analysis profile',
+    '',
+    `Profile: \`${profileId}\`.`,
     '',
     'The 13 deterministic registry analyzers ran locally on this machine, plus a local security pass: the shared SAST engine — the same rules and the same source-to-sink taint tracking as the hosted audit — over the JavaScript, TypeScript and TSX in this repository.',
     '',
@@ -234,6 +273,51 @@ function inferredScopeLines(receipt: Receipt): string[] {
   ]
 }
 
+/**
+ * The comment-shape measurement, rendered from pass metrics rather than from
+ * findings.
+ *
+ * A healthy repository produces no comment finding at all, and a repo-level
+ * "nothing restates the code" finding could never reach a hook receipt anyway:
+ * it carries the same fingerprint in the baseline and the final tree, so the
+ * delta files it under recurring. The positive signal has to come from the
+ * numbers the pass already reports.
+ *
+ * Emits nothing when the pass carries no metrics, so every receipt signed
+ * before this analyzer existed still renders to its original bytes.
+ *
+ * The counted thing is COMMENTS, and the reported thing is FILES OVER THE
+ * THRESHOLD. Stating only the second as though it were the first would be the
+ * one false sentence on an honest receipt: a file holding two restating
+ * comments is under the reporting threshold, but "0 files carry comments that
+ * restate the code" is not true of it.
+ */
+function commentSignalLines(receipt: Receipt): string[] {
+  const metrics = receipt.analyzers.passes.find((pass) => pass.id === 'comment-slop')?.result.metrics
+  if (!metrics) return []
+  const files = Number(metrics.eligibleFiles)
+  const median = Number(metrics.commentRatioMedian)
+  const restating = Number(metrics.redundantComments)
+  const narrating = Number(metrics.narrationComments)
+  const reported = Number(metrics.redundantCommentFiles) + Number(metrics.narrationCommentFiles)
+  if (![files, median, restating, narrating, reported].every(Number.isFinite) || files <= 0) return []
+  return [
+    '',
+    '## Comment signal',
+    '',
+    `This repository comments at a median of ${median} lines per code line. Across the ${files} file(s) measured, `
+    + `${restating} comment(s) restate the code beneath them and ${narrating} narrate an edit rather than describe `
+    + 'behaviour.',
+    '',
+    restating + narrating === 0
+      ? 'Nothing in this repository matched either shape.'
+      : reported === 0
+        ? 'No file carries enough of either shape to be reported, so neither appears in the findings table.'
+        : `${reported} file(s) carry enough of either shape to be reported. The findings table above lists only what `
+          + 'this session introduced or worsened; the counts here cover the whole repository.',
+  ]
+}
+
 /** Which historical rendering of the analysis block to reproduce. */
 type ReceiptMarkdownVariant = 'current' | 'legacy-scores' | 'prior-profile'
 
@@ -277,6 +361,7 @@ function renderMarkdownInternal(receipt: Receipt, variant: ReceiptMarkdownVarian
     // Emits nothing when no finding carries a fix, so every receipt signed
     // before suggestions existed still renders to its original bytes.
     ...suggestedFixLines(receipt.analyzers.findings),
+    ...commentSignalLines(receipt),
     ...analysisLines(receipt, variant),
     ...(receipt.analyzers.delta ? [
       `Finding delta: ${receipt.analyzers.delta.introduced} introduced, ${receipt.analyzers.delta.worsened} worsened, ${receipt.analyzers.delta.recurring} recurring, ${receipt.analyzers.delta.resolved} resolved.`,

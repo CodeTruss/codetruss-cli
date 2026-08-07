@@ -41,6 +41,25 @@ function profileV1Fixture(root: string, patch = 'diff evidence'): Receipt {
   }
 }
 
+/** A receipt as CLI 0.2.35-0.2.38 signed it, when the registry held thirteen analyzers. */
+function profileV2Fixture(root: string, patch = 'diff evidence'): Receipt {
+  const receipt = fixture(root, patch)
+  return {
+    ...receipt,
+    analyzers: {
+      passes: receipt.analyzers.passes,
+      findings: receipt.analyzers.findings,
+      index: receipt.analyzers.index,
+      analysisProfile: {
+        id: 'local-registry-v2',
+        omittedPasses: ['graph'],
+        localPasses: ['local-sast'],
+        scoreStatus: 'not-computed',
+      },
+    },
+  }
+}
+
 function legacyFixture(root: string, patch = 'diff evidence'): Receipt {
   const receipt = fixture(root, patch)
   return {
@@ -72,7 +91,7 @@ describe('signed receipts', () => {
     await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
     const markdown = await readFile(paths.markdown, 'utf8')
     expect(markdown).toContain('Policy SHA-256')
-    expect(markdown).toContain('Profile: `local-registry-v2`')
+    expect(markdown).toContain('Profile: `local-registry-v3`')
     expect(markdown).not.toContain('Final scores:')
     await writeFile(paths.markdown, `${await readFile(paths.markdown, 'utf8')}tampered`)
     await expect(verifyReceipt(dir, receipt.sessionId)).rejects.toThrow('Markdown receipt does not match')
@@ -137,6 +156,78 @@ describe('signed receipts', () => {
     expect(markdown).toContain('**Security static analysis (SAST).**')
     expect(markdown).not.toContain('### What the local security pass checked')
     await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
+  })
+
+  it('reproduces the v2 wording for a receipt signed when the registry held thirteen analyzers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-profile-v2-receipt-'))
+    const dir = join(root, 'receipts')
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+    const receipt = profileV2Fixture(root)
+    const paths = await writeReceipt(dir, receipt, 'diff evidence')
+
+    const markdown = await readFile(paths.markdown, 'utf8')
+    expect(markdown).toContain('Profile: `local-registry-v2`')
+    // The count that execution made, not the count the current registry has.
+    expect(markdown).toContain('The 13 deterministic registry analyzers ran locally on this machine, plus a local security pass')
+    expect(markdown).not.toContain('The 15 deterministic registry analyzers')
+    // The abstraction-shape disclosure belongs to the analyzers v2 never ran.
+    expect(markdown).not.toContain('**Abstraction-shape analysis.**')
+    await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
+  })
+
+  it('states the new registry count and the abstraction-shape limit on a current receipt', () => {
+    const markdown = renderMarkdown(fixture('/tmp/repo'))
+    expect(markdown).toContain('Profile: `local-registry-v3`')
+    expect(markdown).toContain('The 15 deterministic registry analyzers ran locally on this machine')
+    expect(markdown).toContain('**Abstraction-shape analysis.**')
+    expect(markdown).toContain('says nothing either way about those shapes')
+  })
+
+  it('renders the comment-signal measurement from pass metrics, and nothing without them', () => {
+    const receipt = fixture('/tmp/repo')
+    expect(renderMarkdown(receipt)).not.toContain('## Comment signal')
+
+    receipt.analyzers.passes = [{
+      id: 'comment-slop',
+      result: {
+        findings: [],
+        complete: true,
+        metrics: {
+          eligibleFiles: 127, commentRatioMedian: 0.06, commentRatioP90: 0.21,
+          densityOutlierFiles: 0, redundantComments: 0, redundantCommentFiles: 0,
+          narrationComments: 0, narrationCommentFiles: 0,
+        },
+      },
+    }]
+    const healthy = renderMarkdown(receipt)
+    expect(healthy).toContain('## Comment signal')
+    expect(healthy).toContain('a median of 0.06 lines per code line')
+    expect(healthy).toContain('Across the 127 file(s) measured, 0 comment(s) restate the code beneath them and 0 narrate an edit')
+    expect(healthy).toContain('Nothing in this repository matched either shape.')
+    // Observation only: the receipt never names an author or a verdict on taste.
+    expect(healthy).not.toMatch(/\bAI[- ]generated|\bslop\b|sloppy|lazy/i)
+  })
+
+  it('counts comments, not files, so a file under the reporting threshold is never called clean', () => {
+    const receipt = fixture('/tmp/repo')
+    const metrics = {
+      eligibleFiles: 1, commentRatioMedian: 0.083, commentRatioP90: 0.083,
+      densityOutlierFiles: 0, redundantComments: 2, redundantCommentFiles: 0,
+      narrationComments: 0, narrationCommentFiles: 0,
+    }
+    receipt.analyzers.passes = [{ id: 'comment-slop', result: { findings: [], complete: true, metrics } }]
+
+    const markdown = renderMarkdown(receipt)
+    expect(markdown).toContain('2 comment(s) restate the code beneath them and 0 narrate an edit')
+    expect(markdown).toContain('No file carries enough of either shape to be reported')
+    // The measurement found something, so the receipt must not claim it found nothing.
+    expect(markdown).not.toContain('Nothing in this repository matched either shape')
+
+    receipt.analyzers.passes = [{
+      id: 'comment-slop',
+      result: { findings: [], complete: true, metrics: { ...metrics, redundantComments: 49, redundantCommentFiles: 6, narrationComments: 3, narrationCommentFiles: 1 } },
+    }]
+    expect(renderMarkdown(receipt)).toContain('7 file(s) carry enough of either shape to be reported')
   })
 
   it('does not list the LLM review as omitted when a model actually reviewed the diff', () => {

@@ -6,6 +6,18 @@ import {
 } from './types'
 
 /**
+ * Entry-point-ish files that are loaded by convention, not by import
+ * (proxy.ts is Next 16's middleware — deleting it would drop the auth gate).
+ * `instrumentation-client` / `instrumentation.edge` are the suffixed variants
+ * Next.js and Sentry install; `*.stories.tsx` is collected by Storybook's glob.
+ * Neither is ever imported.
+ *
+ * Shared so the speculative-export rule reads the same convention list rather
+ * than deriving a second, drifting copy of it.
+ */
+export const CONVENTION_FILENAME = /(page|layout|route|loading|error|not-found|template|default|middleware|proxy|instrumentation|opengraph-image|twitter-image|icon|apple-icon|sitemap|robots|manifest|index|main|app|server|config|next-env|globals)\.[jt]sx?$|^instrumentation[-.][a-z]+\.[jt]sx?$|\.(stories|story)\.[jt]sx?$|\.(d|config|test|spec)\.[cm]?[jt]s$/
+
+/**
  * Dead-code candidates: JS/TS modules that are never imported anywhere.
  * Heuristic (static string matching), so results are labeled candidates.
  */
@@ -26,13 +38,6 @@ export const deadCodeAnalyzer: Analyzer = {
       (f) => f.kind === 'source' || f.kind === 'component',
     )
     if (jsFiles.length < 5) return findings
-
-    // Entry-point-ish files that are loaded by convention, not by import
-    // (proxy.ts is Next 16's middleware — deleting it would drop the auth gate)
-    // `instrumentation-client` / `instrumentation.edge` are the suffixed
-    // variants Next.js and Sentry install; `*.stories.tsx` is collected by
-    // Storybook's glob. Neither is ever imported.
-    const CONVENTION = /(page|layout|route|loading|error|not-found|template|default|middleware|proxy|instrumentation|opengraph-image|twitter-image|icon|apple-icon|sitemap|robots|manifest|index|main|app|server|config|next-env|globals)\.[jt]sx?$|^instrumentation[-.][a-z]+\.[jt]sx?$|\.(stories|story)\.[jt]sx?$|\.(d|config|test|spec)\.[cm]?[jt]s$/
 
     // package.json script values reference runner entrypoints ("npx tsx
     // lib/db/seed.ts") — raw manifest JSON satisfies the quoted-ref needle.
@@ -64,7 +69,7 @@ export const deadCodeAnalyzer: Analyzer = {
       // Anchored at the project root so a `components/pages/` folder is unaffected.
       if (/^(src\/)?pages\//.test(file.path)) continue
       const base = file.path.split('/').pop()!
-      if (CONVENTION.test(base)) continue
+      if (CONVENTION_FILENAME.test(base)) continue
       // Tooling dotfiles (.prettierrc.js, .eslintrc.js) are loaded by name.
       if (base.startsWith('.')) continue
       const stem = base.replace(/\.[cm]?[jt]sx?$/, '')

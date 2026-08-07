@@ -5,6 +5,69 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.39 — 2026-08-07
+
+- **Two analyzers join the registry, which now holds 15.** Both come from a
+  design study that ran candidate rules against eight real repositories and
+  kept only what survived. Everything they emit is `INFO` or `LOW`, and
+  `computeVerdict` escalates only at `MEDIUM`, so **neither can turn a PASS into
+  a REVIEW_REQUIRED or a FAILED**. A comment that repeats the line below it is
+  not a reason to stop an agent mid-turn.
+- **Comment Signal (`comment-slop`)** measures each file against the
+  repository's own commenting baseline. It reports a file carrying three or more
+  standalone single-line comments whose words already appear on the statement
+  beneath them, and a file carrying two or more comments that narrate an edit
+  (`// Updated to use the new auth middleware`), address the reader, claim
+  credit for the code, or describe the work as provisional (`// In a real app
+  you would verify this`) — the last of which no TODO scan can see, because it
+  carries no marker. Comment *density* is reported as a metric and is never a
+  finding: across the study the most densely commented codebase produced zero
+  restating comments and the sparsest produced sixty-one, so a density rule
+  would penalise exactly the code worth rewarding. Tests, generated and
+  vendored content, scaffolded config, migrations, licensed files, and files
+  under 25 code lines are all out of scope, and the analyzer covers only the
+  eleven languages it has a comment lexer for.
+- **Speculative Structure (`overengineering`)** reports exported values that
+  appear in no other indexed file, tests included, and `catch` blocks whose
+  entire body logs an error and rethrows it unchanged. Export findings are
+  worded as candidates because a symbol reached through a dynamic import or a
+  path built from strings looks identical to this pass. The rule is
+  barrel-aware, skips ORM schema modules, framework convention exports, runner
+  and Pages Router paths, and does not run at all against a library, whose
+  exported surface is its product.
+- **A Convex deployment is not a pile of exports nobody consumes.** Convex
+  bundles a functions directory and addresses its modules by path at runtime, so
+  `export` *is* the registration and the only reference is a string no static
+  pass can follow. Those directories are now excluded, detected from the
+  toolchain rather than the directory name — Convex allows renaming it, and its
+  modules are commonly imported through a path alias no specifier match would
+  catch. Two structural signals are required together: the `convex` dependency
+  in a manifest, and the `_generated/{api,server}` pair that `convex dev` emits
+  into the deployment root. A directory merely *named* `convex` is still swept.
+- **Speculative Structure states what it cannot see.** Single-implementation
+  interfaces, options nobody overrides, and parameters never varied at any call
+  site need the cross-file symbol graph, which does not run locally. The
+  receipt's "What did not run" block now names them, because silence there would
+  read as "no over-engineering found".
+- **Receipts disclose the new count without rewriting the old ones.** The local
+  analysis profile becomes `local-registry-v3`. Receipts signed under
+  `local-registry-v2` keep a frozen renderer that reproduces their
+  "13 deterministic registry analyzers" wording byte for byte, exactly as
+  `local-registry-v1` receipts already did, so every receipt on disk still
+  verifies. Only v3 receipts say 15. The hosted receipt schema accepts all three
+  profile versions and rejects any fourth.
+- A new **Comment signal** section on the receipt reports the repository's
+  median comment ratio, how many comments restate or narrate, and how many
+  files carry enough of either shape to be reported. It counts comments and
+  reports files, and says which is which: a file holding two restating comments
+  is under the reporting threshold, and a receipt that called it clean on that
+  basis would be stating something untrue. It is rendered from pass metrics
+  rather than findings — a
+  repository-level "nothing restates the code" finding fingerprints identically
+  in the baseline and final trees, so the delta would file it under recurring
+  and it could never reach a hook receipt. The section emits nothing when those
+  metrics are absent, so receipts signed before this release render unchanged.
+
 ## 0.2.38 — 2026-08-07
 
 - **A lone changed file no longer seats its own directory as inferred scope
