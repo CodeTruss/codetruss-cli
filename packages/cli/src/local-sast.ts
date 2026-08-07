@@ -13,9 +13,9 @@ import { sastLanguageForPath } from '@codetruss/analyzer-engine/security/lang'
  * rule subset that has been differentially validated against the hosted parser
  * at zero false positives.
  *
- * This is NOT one of the 13 registry analyzers. Keeping it a separate pass is
- * what lets the receipt keep saying "13 deterministic registry analyzers"
- * truthfully while naming this pass and its limits alongside them.
+ * This is NOT one of the registry analyzers. Keeping it a separate pass is what
+ * lets the receipt state the registry count truthfully while naming this pass
+ * and its limits alongside them.
  */
 export const LOCAL_SAST_PASS_ID = 'local-sast'
 

@@ -56,9 +56,10 @@ contacts the session endpoint to verify the saved credential, and `auth logout`
 contacts it to revoke the credential before deleting the local copy; neither
 sends source, patches, or receipts. `--llm --provider anthropic|openai|claude`
 opts into provider review using your API key or authenticated local Claude Code.
-Local receipts identify the 13-pass `local-registry-v1` profile and show hosted
-Health scores as N/A. Graph and SAST run only in the hosted full audit, so the
-CLI never infers a complete score from its smaller local pass set.
+Local receipts identify the 15-pass `local-registry-v3` profile and show hosted
+Health scores as N/A. The hosted symbol graph and the full SAST rule pack run
+only in the hosted full audit, so the CLI never infers a complete score from its
+smaller local pass set.
 CodeTruss supplies a bounded task, reviewed diff prefix, and fixed review schema;
 the provider client may add its own runtime instructions or metadata. The receipt
 discloses reviewed versus total diff bytes, and truncation prevents `PASS`.

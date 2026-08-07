@@ -12,6 +12,8 @@ import { complexityAnalyzer } from './complexity'
 import { todosAnalyzer } from './todos'
 import { vulnerabilityAnalyzer } from './vulnerabilities'
 import { coverageAnalyzer } from './coverage'
+import { commentSlopAnalyzer } from './comment-slop'
+import { overengineeringAnalyzer } from './overengineering'
 
 /**
  * Analyzer registry — the plugin surface. Adding an analyzer means writing
@@ -31,6 +33,8 @@ export const ANALYZERS: Analyzer[] = [
   todosAnalyzer,
   vulnerabilityAnalyzer,
   coverageAnalyzer,
+  commentSlopAnalyzer,
+  overengineeringAnalyzer,
 ]
 
 export function getAnalyzers(): Analyzer[] {

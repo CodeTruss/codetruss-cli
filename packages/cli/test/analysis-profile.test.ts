@@ -28,9 +28,9 @@ describe('honest local analysis profile', () => {
     ].join('\n'))
 
     const analysis = await analyzeRepository(root)
-    // 13 registry analyzers plus the local security pass, which is deliberately
-    // NOT in the registry so "13 deterministic analyzers" stays true.
-    expect(analysis.passes).toHaveLength(14)
+    // 15 registry analyzers plus the local security pass, which is deliberately
+    // NOT in the registry so the receipt's registry count stays true.
+    expect(analysis.passes).toHaveLength(16)
     expect(analysis.passes.at(-1)?.id).toBe('local-sast')
 
     const injection = analysis.findings.find((finding) => finding.metadata?.ruleId === 'sql-injection')

@@ -4,7 +4,7 @@ The deterministic first-pass verification gate for AI-written code.
 
 An agent finishes a change. Something has to look at it before a human does.
 CodeTruss Boundary is that first pass: it captures an exact before/after Git
-evidence pair, checks the change against the task contract you declared, runs 13
+evidence pair, checks the change against the task contract you declared, runs 15
 deterministic analyzers, a local security pass, and your own project checks, then
 signs a `PASS`, `REVIEW_REQUIRED`, or `FAILED` receipt you can re-verify later.
 
@@ -44,7 +44,7 @@ To pin an exact version, install the immutable archive directly:
 
 ```bash
 npm install --global --ignore-scripts --no-audit --no-fund \
-  https://codetruss.com/downloads/codetruss-cli-0.2.38.tgz
+  https://codetruss.com/downloads/codetruss-cli-0.2.39.tgz
 ```
 
 The `@codetruss/cli` package on the npm registry is published as a separate,
@@ -175,7 +175,10 @@ The verdict is not a confidence score.
 Receipts are written as Markdown and JSON next to hashed patch evidence, and can
 be rechecked later with `codetruss verify latest`. Every receipt states the
 detection gaps in its own body, so a `PASS` is never mistaken for a security
-clearance. Abridged from a real 0.2.36 run:
+clearance. Abridged from a real 0.2.36 run, so it prints the `local-registry-v2`
+profile and its thirteen-analyzer wording. A run on this release prints
+`local-registry-v3` and fifteen; 0.2.39 keeps the v2 renderer frozen so the
+receipt below still verifies byte-for-byte as signed:
 
 ```markdown
 # CodeTruss receipt — REVIEW_REQUIRED
@@ -313,8 +316,8 @@ clean global install.
 Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-0.2.38.tgz --repo DeliriumPulse/codetruss-cli
-shasum -a 256 -c codetruss-cli-0.2.38.tgz.sha256
+gh attestation verify codetruss-cli-0.2.39.tgz --repo DeliriumPulse/codetruss-cli
+shasum -a 256 -c codetruss-cli-0.2.39.tgz.sha256
 ```
 
 Maintainers should follow [docs/RELEASE.md](docs/RELEASE.md). Tag-driven GitHub

@@ -124,7 +124,7 @@ describe('local security pass file selection', () => {
 })
 
 describe('the local pass is a pass, not a registry analyzer', () => {
-  it('runs alongside the 13 registry analyzers without joining them', async () => {
+  it('runs alongside the 15 registry analyzers without joining them', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codetruss-local-sast-pass-'))
     cleanup.push(root)
     await mkdir(join(root, 'src'))
@@ -132,7 +132,7 @@ describe('the local pass is a pass, not a registry analyzer', () => {
 
     const analysis = await analyzeRepository(root)
     const ids = analysis.passes.map((pass) => pass.id)
-    expect(ids).toHaveLength(14)
+    expect(ids).toHaveLength(16)
     expect(ids.filter((id) => id === LOCAL_SAST_PASS_ID)).toHaveLength(1)
     expect(ids.at(-1)).toBe(LOCAL_SAST_PASS_ID)
     expect(analysis.passes.at(-1)?.result.complete).toBe(true)
