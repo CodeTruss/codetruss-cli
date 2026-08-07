@@ -44,7 +44,7 @@ To pin an exact version, install the immutable archive directly:
 
 ```bash
 npm install --global --ignore-scripts --no-audit --no-fund \
-  https://codetruss.com/downloads/codetruss-cli-0.2.35.tgz
+  https://codetruss.com/downloads/codetruss-cli-0.2.36.tgz
 ```
 
 The `@codetruss/cli` package on the npm registry is published as a separate,
@@ -175,14 +175,14 @@ The verdict is not a confidence score.
 Receipts are written as Markdown and JSON next to hashed patch evidence, and can
 be rechecked later with `codetruss verify latest`. Every receipt states the
 detection gaps in its own body, so a `PASS` is never mistaken for a security
-clearance. Abridged from a real 0.2.35 run:
+clearance. Abridged from a real 0.2.36 run:
 
 ```markdown
 # CodeTruss receipt — REVIEW_REQUIRED
 
 - **Task:** Fix auth callback validation
-- **Evidence trees:** `271dc5cc…` → `b9cfb7c2…`
-- **Policy SHA-256:** `368f88df…`
+- **Evidence trees:** `a2303191…` → `0f481c3c…`
+- **Policy SHA-256:** `82db19fe…`
 
 ## Verdict: REVIEW_REQUIRED
 
@@ -313,8 +313,8 @@ clean global install.
 Verify a downloaded release yourself:
 
 ```bash
-gh attestation verify codetruss-cli-0.2.35.tgz --repo DeliriumPulse/codetruss-cli
-shasum -a 256 -c codetruss-cli-0.2.35.tgz.sha256
+gh attestation verify codetruss-cli-0.2.36.tgz --repo DeliriumPulse/codetruss-cli
+shasum -a 256 -c codetruss-cli-0.2.36.tgz.sha256
 ```
 
 Maintainers should follow [docs/RELEASE.md](docs/RELEASE.md). Tag-driven GitHub

@@ -170,10 +170,15 @@ export function analysisCoverageNotes(coverage: IndexCoverage | undefined): stri
   return coverageLimitations(coverage)
 }
 
+/** Separator-agnostic so a Windows-shaped path never fails to match its POSIX twin. */
+function posixPath(path: string): string {
+  return path.replaceAll('\\', '/').replace(/^\.\//, '')
+}
+
 export function changedFindings(findings: AnalyzerFinding[], files: ChangedFile[]): AnalyzerFinding[] {
-  const changed = new Set(files.flatMap((file) => [file.path, file.oldPath].filter(Boolean) as string[]))
+  const changed = new Set((files.flatMap((file) => [file.path, file.oldPath].filter(Boolean) as string[])).map(posixPath))
   return findings.filter((finding) => {
-    const filePath = finding.filePath
+    const filePath = finding.filePath ? posixPath(finding.filePath) : undefined
     return Boolean(filePath && [...changed].some((path) => filePath === path || filePath.startsWith(`${path}/`) || path.startsWith(`${filePath}/`)))
   })
 }

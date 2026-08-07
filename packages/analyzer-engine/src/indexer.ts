@@ -100,7 +100,12 @@ async function walk(
       if (IGNORED_DIRS.has(entry.name)) continue
       await walk(full, root, state)
     } else if (entry.isFile()) {
-      state.paths.push(relative(root, full))
+      // POSIX separators always: `relative` yields `src\users.ts` on Windows,
+      // and every other path surface (receipts, git snapshots, policy globs,
+      // scope inference) normalizes to `/`. Emitting the raw platform form here
+      // would make the same file read differently on different platforms and
+      // break every path comparison against those surfaces.
+      state.paths.push(relative(root, full).replaceAll('\\', '/'))
     }
   }
 }

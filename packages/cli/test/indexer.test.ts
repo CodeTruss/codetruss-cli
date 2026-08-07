@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -32,4 +32,18 @@ describe('local binary-aware indexing profile', () => {
       })
     },
   )
+
+  // On a Windows host this runs unsimulated and is the real guard; elsewhere it
+  // pins the contract that indexed paths are the same bytes on every platform.
+  // See indexer-path-separators.test.ts for the host-independent version.
+  it('indexes nested files under POSIX separators on this platform', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-local-index-separators-'))
+    roots.push(root)
+    await mkdir(join(root, 'src', 'deep'), { recursive: true })
+    await writeFile(join(root, 'src', 'deep', 'users.ts'), 'export const users = []\n')
+
+    const index = await indexRepository(root)
+
+    expect(index.files.map((file) => file.path)).toEqual(['src/deep/users.ts'])
+  })
 })

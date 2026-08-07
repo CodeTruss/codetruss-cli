@@ -1,13 +1,13 @@
 {
   "name": "@codetruss/cli",
-  "version": "0.2.35",
-  "url": "/downloads/codetruss-cli-0.2.35.tgz",
+  "version": "0.2.36",
+  "url": "/downloads/codetruss-cli-0.2.36.tgz",
   "latestUrl": "/downloads/codetruss-cli-latest.tgz",
-  "sha256": "a58a392e4b8dead73a032b94500c8a73ff67e2b6a11431bc041ad9ba9f99826f",
-  "sbomUrl": "/downloads/codetruss-cli-0.2.35.sbom.cdx.json",
-  "sbomSha256": "d36ddf22be41f5b86c67f0406bf90a6493296dcadff354229d822a892afb6347",
+  "sha256": "953e3f48725a7471043b48a55aedd33ef78854615a341dd95881d90eeae3e814",
+  "sbomUrl": "/downloads/codetruss-cli-0.2.36.sbom.cdx.json",
+  "sbomSha256": "41db21a7ada85d04be35aa89858ef486f2d1d74e1161d0235029c7a1b1f8f736",
   "node": ">=20.9.0",
   "repository": "https://github.com/DeliriumPulse/codetruss-cli",
-  "releaseUrl": "https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.35",
-  "attestationCommand": "gh attestation verify codetruss-cli-0.2.35.tgz --repo DeliriumPulse/codetruss-cli"
+  "releaseUrl": "https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.36",
+  "attestationCommand": "gh attestation verify codetruss-cli-0.2.36.tgz --repo DeliriumPulse/codetruss-cli"
 }

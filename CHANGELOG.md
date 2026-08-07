@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.35 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.35),
+The current public release is [v0.2.36 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.36),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 The npm `latest` tag is still
 [`@codetruss/cli@0.2.24`](https://www.npmjs.com/package/@codetruss/cli/v/0.2.24):
@@ -16,7 +16,21 @@ were superseded before distribution.
 
 No unreleased changes.
 
-## 0.2.35 — 2026-08-07
+## 0.2.36 — 2026-08-07
+
+- **Indexed file paths are now the same bytes on every platform.** The
+  repository walk emitted whatever separator the host used, so a Windows run
+  produced `src\users.ts` while every other path surface in the CLI — receipts,
+  git snapshots, policy globs, scope inference — normalized to `src/users.ts`.
+  Three consequences, all fixed by normalizing at the source: a signed receipt's
+  findings table and its changed-files table named the same file two different
+  ways; receipt bytes differed by platform for an identical tree, so a
+  cross-platform reproduction could not match; and vendored-directory exclusion
+  (`.claude/`, `vendor/`, …) silently stopped matching on Windows, pulling
+  tooling payloads back into analysis.
+- `changedFindings()` now compares paths separator-agnostically as well. The
+  source fix already makes both sides POSIX, so this is defense in depth against
+  any future caller that hands in a raw platform path.
 
 - **Security analysis now runs locally.** The rule pack and taint solver that
   previously existed only in hosted scans execute on your machine, offline, over
