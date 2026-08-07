@@ -256,9 +256,9 @@ producing signed receipts cost nothing and always will. There is no seat count,
 no trial clock, and no feature that stops working once you depend on it.
 
 The paid line sits at the network boundary: local stays free, hosted is billed.
-Hosted plans start at $19 per seat, with a $9 receipt-history tier, $15 per seat
-for teams, and $249 for agencies. See
-[codetruss.com/pricing](https://codetruss.com/pricing).
+The hosted side starts free, then receipt History at $9/mo, Pro at $19 per seat,
+Team at $15 per seat with a 5-seat minimum, and Agency at $249/mo including 15
+client workspaces. See [codetruss.com/pricing](https://codetruss.com/pricing).
 
 ## Source and development
 
