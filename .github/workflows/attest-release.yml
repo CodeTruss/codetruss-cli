@@ -2,10 +2,23 @@ name: Attest release
 
 # Rebuilds a published release from its tag and attests the result. The build is
 # deterministic, so a rebuild of the tagged source reproduces the published
-# archive byte for byte. This workflow asserts that before it signs anything: if
-# the rebuild does not match the checksum published with the release, it fails
-# and attests nothing. An attestation is a claim that this workflow built these
-# exact bytes from this exact source, and it is only worth making when true.
+# archive and its SBOM byte for byte. This workflow asserts that before it signs
+# anything: if either rebuilt file does not match what the release published, it
+# fails and attests nothing. An attestation is a claim that this workflow built
+# these exact bytes from this exact source, and it is only worth making when true.
+#
+# This workflow can restore two of the three predicates a normal release carries:
+# SLSA build provenance and the CycloneDX SBOM. It cannot restore the third. The
+# `https://in-toto.io/attestation/release/v0.2` predicate is issued by GitHub
+# itself at publication time and signed by `https://dotcom.releases.github.com`,
+# not by any workflow identity, and these releases are already published and
+# immutable. Emitting a lookalike from Actions would be a different claim wearing
+# the same predicate type, so this workflow does not emit one.
+#
+# The provenance this workflow signs also names `attest-release.yml@refs/heads/main`
+# as the builder, because that is what built it. It does not and cannot claim to
+# be `release.yml` at the tag. Verification that pins the signer workflow will
+# fail for anything attested here, and that is the honest result.
 
 on:
   workflow_dispatch:
@@ -49,7 +62,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Rebuild the release artifact from the tagged source
         run: pnpm release:artifact
-      - name: Require the rebuild to match the published checksum
+      - name: Require the rebuild to match the published release
         id: artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,13 +70,16 @@ jobs:
         run: |
           VERSION="${TAG#v}"
           NAME="codetruss-cli-${VERSION}.tgz"
+          SBOM_NAME="codetruss-cli-${VERSION}.sbom.cdx.json"
           ARCHIVE="public/downloads/${NAME}"
+          SBOM="public/downloads/${SBOM_NAME}"
 
-          # The expected digest comes from the checksum published alongside the
-          # release, never from anything computed in this job.
+          # The expected bytes come from the release itself, never from anything
+          # computed in this job.
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "${NAME}.sha256" \
+            --pattern "$SBOM_NAME" \
             --dir published
           PUBLISHED="$(cut -d' ' -f1 "published/${NAME}.sha256")"
           REBUILT="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
@@ -76,8 +92,60 @@ jobs:
             exit 1
           fi
 
+          # The SBOM predicate describes the archive, so the SBOM this job signs
+          # has to be the one the release shipped, not merely a similar one.
+          PUBLISHED_SBOM="$(sha256sum "published/${SBOM_NAME}" | cut -d' ' -f1)"
+          REBUILT_SBOM="$(sha256sum "$SBOM" | cut -d' ' -f1)"
+
+          echo "published sbom $PUBLISHED_SBOM"
+          echo "rebuilt   sbom $REBUILT_SBOM"
+
+          if [ "$PUBLISHED_SBOM" != "$REBUILT_SBOM" ]; then
+            echo "::error::$SBOM_NAME did not rebuild to the published SBOM; refusing to attest an SBOM this workflow cannot reproduce"
+            exit 1
+          fi
+
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "sbom=$SBOM" >> "$GITHUB_OUTPUT"
+          echo "digest=$REBUILT" >> "$GITHUB_OUTPUT"
+      - name: Find which predicates the digest is already missing
+        id: missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.artifact.outputs.digest }}
+        run: |
+          # Signing a claim that is already on record adds noise, not evidence.
+          # Only the predicates this digest lacks get attested.
+          # A digest with no attestations answers 404; that is "nothing present",
+          # not a failure. Only a successful response is treated as the record.
+          if ! PRESENT="$(gh api "repos/${GITHUB_REPOSITORY}/attestations/sha256:${DIGEST}" \
+            --jq '.attestations[].bundle.dsseEnvelope.payload | @base64d | fromjson | .predicateType' \
+            2>/dev/null)"; then
+            PRESENT=""
+          fi
+
+          echo "already present:"
+          echo "${PRESENT:-  (none)}"
+
+          if echo "$PRESENT" | grep -qx 'https://slsa.dev/provenance/v1'; then
+            echo "provenance=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "provenance=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$PRESENT" | grep -qx 'https://cyclonedx.org/bom'; then
+            echo "sbom=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "sbom=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Attest package build provenance
+        if: steps.missing.outputs.provenance == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.artifact.outputs.archive }}
+      - name: Attest package SBOM
+        if: steps.missing.outputs.sbom == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.artifact.outputs.archive }}
+          sbom-path: ${{ steps.artifact.outputs.sbom }}
