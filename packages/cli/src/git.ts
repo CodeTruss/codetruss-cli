@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { readFile, stat } from 'node:fs/promises'
 import { devNull } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -450,8 +450,17 @@ function verificationDelay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 }
 
-async function terminateVerificationProcessTree(pid: number): Promise<void> {
+async function terminateVerificationProcessTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid
+  if (pid === undefined) return
   if (process.platform === 'win32') {
+    // taskkill /t enumerates the tree from the leader pid, so once the leader
+    // has exited it cannot reach anything — and Windows recycles freed pids
+    // within milliseconds, so addressing one can force-kill an unrelated
+    // process. The liveness check uses our own process handle and cannot be
+    // misdirected; a leader exiting between this check and taskkill's own
+    // snapshot is the same narrow race every taskkill user carries.
+    if (child.exitCode !== null || child.signalCode !== null) return
     spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], {
       stdio: 'ignore',
       timeout: 2_000,
@@ -488,7 +497,7 @@ export async function runVerification(
     let cleanupPromise: Promise<void> | undefined
 
     const cleanup = (): Promise<void> => {
-      cleanupPromise ??= child.pid === undefined ? Promise.resolve() : terminateVerificationProcessTree(child.pid)
+      cleanupPromise ??= terminateVerificationProcessTree(child)
       return cleanupPromise
     }
     const finish = (exitCode: number, suffix = ''): void => {

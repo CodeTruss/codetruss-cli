@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { assertChangelogPolicy } from './changelog-policy.mjs'
 import { buildDeterministicPackageArchive } from './deterministic-package.mjs'
 import { assertReleasePackagePolicy } from './release-package-policy.mjs'
 import { verifyDeterministicPackageArchive } from './verify-deterministic-package.mjs'
@@ -23,6 +24,7 @@ function run(command, args, cwd = packageDir) {
 try {
   const pkg = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'))
   assertReleasePackagePolicy(pkg)
+  assertChangelogPolicy(await readFile(join(packageDir, 'CHANGELOG.md'), 'utf8'), pkg.version)
   // Invoke the build through Node directly. Package-manager shims are `.cmd`
   // files on Windows and cannot be spawned by Node without a shell; the build
   // itself is already a portable Node script and needs no shell mediation.

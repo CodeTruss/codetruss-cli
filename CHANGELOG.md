@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.36 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.36),
+The current public release is [v0.2.37 on GitHub](https://github.com/DeliriumPulse/codetruss-cli/releases/tag/v0.2.37),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 The npm `latest` tag is still
 [`@codetruss/cli@0.2.24`](https://www.npmjs.com/package/@codetruss/cli/v/0.2.24):
@@ -15,6 +15,35 @@ were superseded before distribution.
 ## Unreleased
 
 No unreleased changes.
+
+## 0.2.37 — 2026-08-07
+
+- **A process tree whose leader already exited is never force-killed on
+  Windows.** Verification and local-provider cleanup ran
+  `taskkill /pid <leader> /t /f` from the child's own exit handler — where the
+  leader is dead by definition — and from the timeout path after the leader had
+  exited. Windows recycles a freed pid within milliseconds, so that force-kill
+  could land on an unrelated process that had just inherited the number; it is
+  what killed a freshly forked vitest worker mid-run in CI. Both call sites now
+  gate on liveness read from our own `ChildProcess` handle, which pid reuse
+  cannot misdirect. Nothing is lost by skipping: `taskkill /t` enumerates the
+  tree from the leader, so a dead leader could not have reached a descendant
+  anyway.
+- The escaped-descendant test closed the same vector in its own cleanup. It
+  SIGKILLed the pid recorded in a pidfile, and once the deadline had already
+  reaped the tree that pid could belong to an innocent process — a liveness
+  probe cannot tell a recycled pid from a live descendant. The descendant now
+  exits on its own when a sentinel file disappears, so cleanup signals no
+  recorded pid at all.
+- **The release build now reads the changelog it ships.** `pnpm cli:release`
+  fails unless the version being built has its own `## <version> — <date>`
+  heading and every release heading forms one unbroken descending chain — each
+  version exactly once, in order, no gaps, and nothing stranded above the newest
+  entry.
+- Repairs the changelog that guard was written for: CLI 0.2.36 overwrote
+  `## 0.2.35 — 2026-08-07` with its own heading, leaving the entire local-SAST
+  release's notes orphaned under 0.2.36 and erasing 0.2.35 from the history.
+  Both entries are now restored to what each release actually shipped.
 
 ## 0.2.36 — 2026-08-07
 
@@ -31,6 +60,8 @@ No unreleased changes.
 - `changedFindings()` now compares paths separator-agnostically as well. The
   source fix already makes both sides POSIX, so this is defense in depth against
   any future caller that hands in a raw platform path.
+
+## 0.2.35 — 2026-08-07
 
 - **Security analysis now runs locally.** The rule pack and taint solver that
   previously existed only in hosted scans execute on your machine, offline, over
