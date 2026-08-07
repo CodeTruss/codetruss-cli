@@ -75,10 +75,58 @@ jobs:
           CHECKSUM: ${{ steps.artifact.outputs.checksum }}
           SBOM: ${{ steps.artifact.outputs.sbom }}
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIGEST="$(cut -d' ' -f1 "$CHECKSUM")"
+
+          # Release notes are the changelog entry for this version, not a list of
+          # commit subjects. `--generate-notes` on a repo whose only commit per
+          # release is "Release CodeTruss CLI vX" produces a note that says
+          # nothing a reader did not already know from the title.
+          {
+            awk -v ver="## $VERSION " '
+              index($0, ver) == 1 { found = 1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md
+
+            cat <<NOTES
+
+          ## Install
+
+          \`\`\`bash
+          curl -fsSL https://codetruss.com/install.sh | sh
+          \`\`\`
+
+          Windows (PowerShell):
+
+          \`\`\`powershell
+          irm https://codetruss.com/install.ps1 | iex
+          \`\`\`
+
+          ## Verify what you installed
+
+          \`\`\`
+          sha256  $DIGEST
+          \`\`\`
+
+          \`\`\`bash
+          gh attestation verify codetruss-cli-$VERSION.tgz --repo $GITHUB_REPOSITORY
+          \`\`\`
+
+          The archive ships with a CycloneDX SBOM and SLSA build provenance. You
+          should not have to take our word for what is in it.
+          NOTES
+          } > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for $VERSION; refusing to publish an empty release note." >&2
+            exit 1
+          fi
+
           gh release create "$GITHUB_REF_NAME" \
             --draft \
             --verify-tag \
-            --generate-notes \
+            --notes-file release-notes.md \
             --title "CodeTruss CLI $GITHUB_REF_NAME"
           gh release upload "$GITHUB_REF_NAME" \
             "$ARCHIVE" \
