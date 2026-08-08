@@ -327,6 +327,24 @@ describe('CLI snapshot and delta enforcement', () => {
     expect(unattended.stderr).toContain('non-interactive setup requires at least one explicit --allow')
   }, 60_000)
 
+  it('answers a brace-bomb --allow glob with an error instead of dying on it', async () => {
+    // The 7.5 KB pattern that ended CLI 0.2.45 in an out-of-memory abort:
+    // exit 134, no verdict, no receipt. A typed flag reaches the same matcher
+    // as a repository's own policy, so it gets the same bound.
+    const root = await repository()
+    await writeFile(join(root, 'value.ts'), 'export const value = 1\n')
+    git(root, 'add', '.')
+    git(root, 'commit', '--quiet', '-m', 'baseline')
+
+    const bombed = runCli(root, [
+      'review', '--task', 'Review the current change', '--allow', '{a,b}'.repeat(1500), '--no-verify',
+    ])
+
+    expect(bombed.signal).toBe(null)
+    expect(bombed.status, `${bombed.stderr}\n${bombed.stdout}`).toBe(3)
+    expect(bombed.stderr).toContain('allow glob is 7500 characters, over the 512-character limit')
+  }, 20_000)
+
   it('leaves no active hook when verification trust is declined during setup', async () => {
     const root = await repository()
     await mkdir(join(root, 'src'))

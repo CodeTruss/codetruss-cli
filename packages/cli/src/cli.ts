@@ -4,7 +4,7 @@ import { realpath, rmdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { analyzeRepository, analysisClassificationNotes, analysisCoverageNotes, analysisEvidenceIssues, analysisExclusionNotes, analyzerReceipt, computeVerdict, diffFindings, prefixEvidenceIssue, type EvidenceIssue } from './analysis.js'
 import { loadSyncAuthentication } from './auth-storage.js'
-import { CONFIG_FILE, initialize, loadConfig, receiptDir, trustLocalSigningKey } from './config.js'
+import { CONFIG_FILE, boundedScopeGlobs, initialize, loadConfig, receiptDir, trustLocalSigningKey } from './config.js'
 import {
   allocatedVerificationTimeout,
   captureDiffEvidence,
@@ -372,8 +372,10 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
   await requireTrustedSigningKey(config.signing.publicKeys)
   const options: ReviewOptions = {
     mode, task,
-    allow: many(parsed, 'allow', config.allow),
-    deny: many(parsed, 'deny', config.deny),
+    // The same bound the config file gets: a typed --allow reaches the same
+    // matcher as a repository-supplied one.
+    allow: boundedScopeGlobs(many(parsed, 'allow', config.allow), 'allow'),
+    deny: boundedScopeGlobs(many(parsed, 'deny', config.deny), 'deny'),
     // Repository-owned only. A command-line flag that could silence analysis of
     // any path would turn the escape hatch into a way to launder a receipt.
     exclude: config.exclude,
