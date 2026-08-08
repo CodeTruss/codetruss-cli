@@ -18,8 +18,10 @@ import { loadGrammarParser } from './grammar-parser.js'
  *
  * Same engine, same rules, same taint solver as the hosted audit — behind a
  * zero-dependency parser instead of 6 MB of WASM grammars, and restricted to the
- * rule subset that has been differentially validated against the hosted parser
- * at zero false positives.
+ * rule subset that has been differentially validated against the hosted parser:
+ * same rule, same file, zero disagreement. That is a PARSER-parity claim and
+ * this comment used to overstate it as "at zero false positives"; see the
+ * correction in {@link CLI_SAST_RULE_IDS}.
  *
  * Since 0.2.40 the pass has a SECOND parser: an opt-in grammar pack the user
  * installs explicitly (`codetruss grammars install python`). When present and

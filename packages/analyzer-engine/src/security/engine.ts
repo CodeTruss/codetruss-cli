@@ -5,13 +5,24 @@ import {
   type SastParser,
   type SyntaxNode,
 } from './lang'
-import { asCall, asFunction, urlHeadOf, walk, type NCall, type NFunc } from './normalize'
+import {
+  asCall,
+  asFunction,
+  identifierName,
+  isTaggedTemplate,
+  stringLiteralValue,
+  urlHeadOf,
+  walk,
+  type NCall,
+  type NFunc,
+} from './normalize'
 import {
   analyzeFunction,
   bindsToLocalFn,
   firstSource,
   hasRealSource,
   paramIndexes,
+  soleParamOrigin,
   taintBudgetExhausted,
   taintOf,
   type FunctionTaint,
@@ -430,6 +441,8 @@ async function scanOne(
   })
 
   const findings: SastFinding[] = []
+  /** Sinks whose whole dangerous argument is a parameter — see {@link resolveCallerSupplied}. */
+  const callerSupplied: CallerSuppliedCandidate[] = []
   const enabled = (id: string) => !options.ruleIds || options.ruleIds.has(id)
   const applicableSinks = TAINT_SINKS.filter((s) => ruleAppliesTo(s, lang) && enabled(s.id))
   const applicablePatterns = PATTERN_RULES.filter((p) => ruleAppliesTo(p, lang) && enabled(p.id))
@@ -501,6 +514,31 @@ async function scanOne(
           if (hasRealSource(origins)) {
             const src = firstSource(origins)!
             findings.push(makeTaintFinding(sink, lang, filePath, call, src.node, src.sourceKind, false, loc, lines))
+          } else if (sink.callerSuppliedArg?.appliesTo(call, lang)) {
+            // The argument IS one of this function's parameters, named: not a
+            // local built from one. The distinction is the whole precision of
+            // this report and the corpus found it — firecrawl's
+            // `services/worker/nuq.ts:1028` passes a local `query` assembled
+            // from a template two lines above, whose only taint origin happens
+            // to be a parameter. Nobody supplies that string; the file builds
+            // it, in view, so "supplied by the caller" would be false about it.
+            // Requiring the identifier to be the parameter itself keeps this to
+            // the case where the file performs no query construction at all.
+            //
+            // Held back until every call site is known — a same-file caller
+            // binding a literal or a tagged template answers the question the
+            // finding would ask.
+            //
+            // An anonymous enclosing function is skipped outright. The
+            // suppression below resolves call sites BY NAME, so a nameless
+            // function can never be shown to be constrained and would report
+            // unconditionally — `const run = (sql) => pool.query(sql)` beside
+            // `run('SELECT 1')` is safe and would fire. Stated recall cost:
+            // this report never reaches an arrow assigned to a variable.
+            const param = soleParamOrigin(origins)
+            if (param && rec.fn.name !== ANONYMOUS_FN && identifierName(arg, lang) === param.name) {
+              callerSupplied.push({ sink, call, fn: rec.fn, paramIndex: param.index, paramName: param.name })
+            }
           }
           for (const pi of paramIndexes(origins)) {
             if (!rec.sinkParams.has(pi)) rec.sinkParams.set(pi, { sink, node: call.node, line: call.line })
@@ -542,6 +580,11 @@ async function scanOne(
     }
   }
 
+  // ---- caller-supplied SQL text ----
+  if (callerSupplied.length > 0 && !expired()) {
+    resolveCallerSupplied(callerSupplied, parsed.rootNode, lang, filePath, findings, loc, lines, expired)
+  }
+
   // ---- pattern rules (single pass over the whole tree) ----
   runPatternRules(parsed.rootNode, applicablePatterns, lang, filePath, findings, lines, expired)
 
@@ -556,6 +599,110 @@ async function scanOne(
   // separate flag only lets the caller name it.
   if (timeCapped) truncated = true
   return { findings, truncated, timeCapped }
+}
+
+/** What {@link asFunction} names a function whose node carries no `name` field. */
+const ANONYMOUS_FN = '<anonymous>'
+
+/** A sink argument that is exactly one of the enclosing function's parameters. */
+interface CallerSuppliedCandidate {
+  sink: TaintSink
+  call: NCall
+  fn: NFunc
+  paramIndex: number
+  paramName: string
+}
+
+/**
+ * Decide which caller-supplied-argument candidates survive, and report them.
+ *
+ * The question a candidate asks is "what can a caller put here?", so the answer
+ * lives at the call sites. One same-file call binding a safe construction —
+ * a string literal, or a tagged template whose interpolations are bound values —
+ * shows the file DOES constrain the parameter, and the candidate is dropped.
+ * A function nothing in this file calls keeps its finding: its callers are
+ * outside the translation unit, which is precisely why the value is unknown.
+ *
+ * Call sites are matched by name under the same rule as the interprocedural hop
+ * ({@link bindsToLocalFn}): a direct call, or `this`/`self`. A member call on
+ * any other receiver is a different function that merely shares a name.
+ */
+function resolveCallerSupplied(
+  candidates: CallerSuppliedCandidate[],
+  root: SyntaxNode,
+  lang: SastLanguage,
+  filePath: string,
+  findings: SastFinding[],
+  loc: (n: SyntaxNode, label: string) => CodeLocation & { label: string },
+  lines: string[],
+  expired: () => boolean,
+): void {
+  const wanted = new Set(candidates.map((c) => c.fn.name))
+  /** `${fnName}#${paramIndex}` for every parameter a call site binds safely. */
+  const constrained = new Set<string>()
+  walk(root, (node) => {
+    if (expired()) return
+    const call = asCall(node, lang)
+    if (!call || call.isConstruct || !wanted.has(call.method) || !bindsToLocalFn(call)) return
+    call.args.forEach((arg, i) => {
+      if (stringLiteralValue(arg, lang) !== null || isTaggedTemplate(arg, lang)) {
+        constrained.add(`${call.method}#${i}`)
+      }
+    })
+  })
+  // A drained clock means the call-site sweep is incomplete, so "no call site
+  // constrains it" is unproven. Report nothing rather than report on a partial
+  // answer; the file is already marked truncated.
+  if (expired()) return
+  const seen = new Set<number>()
+  for (const candidate of candidates) {
+    if (findings.length >= MAX_FINDINGS_PER_FILE) return
+    if (constrained.has(`${candidate.fn.name}#${candidate.paramIndex}`)) continue
+    if (seen.has(candidate.call.node.id)) continue
+    seen.add(candidate.call.node.id)
+    findings.push(makeCallerSuppliedFinding(candidate, lang, filePath, loc, lines))
+  }
+}
+
+function makeCallerSuppliedFinding(
+  candidate: CallerSuppliedCandidate,
+  lang: SastLanguage,
+  filePath: string,
+  loc: (n: SyntaxNode, label: string) => CodeLocation & { label: string },
+  lines: string[],
+): SastFinding {
+  const { sink, call, fn, paramName } = candidate
+  const report = sink.callerSuppliedArg!
+  const info = CWE[sink.cweKey]
+  const source = loc(fn.node, `${fn.name}(${paramName}) — supplied by the caller`)
+  const sinkLoc = loc(call.node, `${call.fullName}()`)
+  return {
+    ruleId: sink.id,
+    kind: 'taint',
+    cwe: info.cwe,
+    owasp: info.owasp,
+    severity: report.severity,
+    title: sink.title,
+    message: report.message(fn.name, paramName),
+    language: lang,
+    filePath,
+    line: call.line,
+    column: call.node.startPosition.column + 1,
+    flow: {
+      source,
+      sink: sinkLoc,
+      steps: [source, sinkLoc],
+      summary: `${fn.name}(${paramName}) → ${call.fullName}()`,
+      interprocedural: false,
+    },
+    remediation: report.remediation,
+    metadata: sortMeta({
+      callerSupplied: true,
+      parameter: paramName,
+      sink: call.fullName,
+      snippet: snippetAt(lines, call.line - 1),
+    }),
+  }
 }
 
 /** Pattern-rule pass over a tree. Cheap (no taint), so it always runs even when

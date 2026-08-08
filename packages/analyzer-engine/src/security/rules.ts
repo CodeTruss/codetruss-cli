@@ -12,6 +12,7 @@ import {
   identifierName,
   interpolationExprs,
   isFunctionNode,
+  isTaggedTemplate,
   numberLiteralValue,
   stringLiteralValue,
   subscriptBase,
@@ -59,6 +60,36 @@ export interface TaintSink extends RuleMeta {
    * later path/query segments of a constant-authority string.
    */
   taintPosition?: 'head'
+  /**
+   * Report a dangerous argument that is exactly one of the enclosing function's
+   * PARAMETERS, with no untrusted source behind it.
+   *
+   * Off for every sink but SQL, and deliberately so. A parameter reaching a
+   * sink is normally not a finding — the analysis cannot see the call sites, so
+   * `readFile(name)` in a helper says nothing. SQL is the exception because the
+   * argument is not data but the *program being executed*: a function whose
+   * whole query text comes from its caller has no constraint on what runs, and
+   * nothing later in the file can add one. That is what the ten-repository
+   * corpus caught us missing on `uptime-kuma/server/monitor-types/postgres.js`.
+   *
+   * The engine still suppresses it when any same-file call site binds a safe
+   * construction (a string literal or a tagged template) to that parameter,
+   * because then the file DOES show what runs.
+   */
+  callerSuppliedArg?: {
+    severity: Severity
+    /**
+     * Positive evidence that this call really is the sink, required because
+     * there is no taint flow to supply it. {@link match} may be generous about
+     * a method name when a request source has already been traced into it; with
+     * only a parameter behind the argument the name is all there is, and
+     * `this.query(rightIndex)` in a Fenwick tree is not a database.
+     */
+    appliesTo(call: NCall, lang: SastLanguage): boolean
+    /** Prose for the finding, given the function and parameter names. */
+    message(fnName: string, paramName: string): string
+    remediation: string
+  }
 }
 
 export interface PatternHit {
@@ -207,6 +238,29 @@ function optionIsTrue(call: NCall, lang: SastLanguage, name: string): boolean {
 // TAINT SINKS
 // ---------------------------------------------------------------------------
 
+/** Argument indexes of a call that carry SQL TEXT, before shape filtering. */
+function sqlSinkArgs(call: NCall, lang: SastLanguage): number[] | null {
+  const m = lc(call.method)
+  if (SQL_ALWAYS.has(m)) return [0]
+  if (SQL_GATED.has(m)) {
+    if (DB_RECEIVER.test(call.receiverName ?? '')) return [0]
+    if (CURSOR_METHODS.has(m) && receiverBindsToCursor(call, lang)) return [0]
+  }
+  // Go database/sql, gated on a DB-ish receiver. Context variants take
+  // (ctx, query, ...args) so the SQL string is argument 1, not 0.
+  if (DB_RECEIVER.test(call.receiverName ?? '')) {
+    if (m === 'queryrow') return [0]
+    if (m === 'querycontext' || m === 'queryrowcontext' || m === 'execcontext') return [1]
+  }
+  // Prisma raw escape hatches. Only the Unsafe variants take a plain SQL
+  // string — tagged $queryRaw/$executeRaw templates are parameterized by
+  // Prisma and must NOT flag. (asCall strips the leading $, so match both.)
+  if (/^\$?(query|execute)rawunsafe$/.test(m)) return [0]
+  // C#/Java: new SqlCommand(sql) / new Statement(sql)
+  if (call.isConstruct && /sqlcommand|npgsqlcommand|mysqlcommand|oledbcommand/i.test(call.fullName)) return [0]
+  return null
+}
+
 export const TAINT_SINKS: TaintSink[] = [
   // ---- SQL injection ----
   {
@@ -217,26 +271,30 @@ export const TAINT_SINKS: TaintSink[] = [
     title: 'SQL injection',
     message: 'Untrusted input is concatenated into a SQL query and executed. An attacker can alter the query to read or modify arbitrary data.',
     remediation: 'Use parameterized queries / prepared statements and pass user input as bound parameters, never string concatenation.',
+    callerSuppliedArg: {
+      severity: 'HIGH',
+      // `query`/`raw`/`exec` are SQL sinks on any receiver once a request source
+      // has been traced into them. With only a parameter behind the argument
+      // the receiver is the entire case that this is a database at all, and the
+      // ten-repository corpus made the point: `this.query(rightIndex)` inside
+      // `FenwickTree.queryRange` is a prefix-sum lookup, reported twice before
+      // this gate and correctly silent after it.
+      appliesTo: (call) => DB_RECEIVER.test(call.receiverName ?? ''),
+      message: (fnName, paramName) =>
+        `${fnName}() executes the SQL text it receives in its \`${paramName}\` parameter. The query is not built in this file, so nothing here constrains what a caller can run, and no call site in this file binds a constant or a parameterized template to it. Whether this is injectable is decided entirely by callers the analysis cannot see.`,
+      remediation:
+        'Keep the query text a constant inside this function and accept only bound parameters from callers. If callers genuinely must choose the statement, validate their input against an allow-list of known queries rather than executing it verbatim.',
+    },
     match(call, lang) {
-      const m = lc(call.method)
-      if (SQL_ALWAYS.has(m)) return [0]
-      if (SQL_GATED.has(m)) {
-        if (DB_RECEIVER.test(call.receiverName ?? '')) return [0]
-        if (CURSOR_METHODS.has(m) && receiverBindsToCursor(call, lang)) return [0]
-      }
-      // Go database/sql, gated on a DB-ish receiver. Context variants take
-      // (ctx, query, ...args) so the SQL string is argument 1, not 0.
-      if (DB_RECEIVER.test(call.receiverName ?? '')) {
-        if (m === 'queryrow') return [0]
-        if (m === 'querycontext' || m === 'queryrowcontext' || m === 'execcontext') return [1]
-      }
-      // Prisma raw escape hatches. Only the Unsafe variants take a plain SQL
-      // string — tagged $queryRaw/$executeRaw templates are parameterized by
-      // Prisma and must NOT flag. (asCall strips the leading $, so match both.)
-      if (/^\$?(query|execute)rawunsafe$/.test(m)) return [0]
-      // C#/Java: new SqlCommand(sql) / new Statement(sql)
-      if (call.isConstruct && /sqlcommand|npgsqlcommand|mysqlcommand|oledbcommand/i.test(call.fullName)) return [0]
-      return null
+      const idxs = sqlSinkArgs(call, lang)
+      // A tagged template hands its interpolations to the tag as bound values
+      // instead of splicing them into the string, so it is the parameterized
+      // construction, not concatenation — the exemption Prisma's `$queryRaw`
+      // already had inside `sqlSinkArgs`, expressed as the SHAPE so drizzle's
+      // `sql`, slonik, postgres.js and the next library to adopt it are too. The
+      // escape hatches (`sql.raw`, `$queryRawUnsafe`) are ordinary calls, not
+      // tagged templates, so they still match — including nested inside one.
+      return idxs && idxs.filter((i) => !call.args[i] || !isTaggedTemplate(call.args[i], lang))
     },
   },
 

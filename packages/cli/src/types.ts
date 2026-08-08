@@ -33,7 +33,16 @@ export const MAX_LLM_DIFF_BYTES = 2_000_000
  * Honest local-analysis contract: which passes ran on this machine, which did
  * not, and whether scores may be inferred.
  *
- * `local-registry-v4` supersedes `local-registry-v3`. The pass SET is identical
+ * `local-registry-v5` supersedes `local-registry-v4`. The pass SET is identical
+ * again, but v4's SQL bullet says CWE-89 means "untrusted input tracked from
+ * request sources through string building into query execution", and since
+ * 0.2.53 that is not the whole of what the rule reports: a query whose entire
+ * text is a caller-supplied parameter is reported too, at HIGH, with no request
+ * source behind it. A receipt that under-describes what its own pass can say is
+ * the failure this block exists to prevent, so the wording changed and the id
+ * changed with it.
+ *
+ * `local-registry-v4` had superseded `local-registry-v3`. The pass SET is identical
  * — fifteen registry analyzers, the local security pass, no graph — but v3's
  * block states flatly that the local pass "covers JavaScript, TypeScript and
  * TSX only" and that Python "received no security rule or taint analysis". With
@@ -51,7 +60,7 @@ export const MAX_LLM_DIFF_BYTES = 2_000_000
  * with. Every superseded version keeps a frozen renderer in `receipt.ts`.
  */
 export const LOCAL_ANALYSIS_PROFILE = {
-  id: 'local-registry-v4',
+  id: 'local-registry-v5',
   omittedPasses: ['graph'],
   localPasses: ['local-sast'],
   scoreStatus: 'not-computed',
@@ -78,11 +87,19 @@ export interface LegacyLocalAnalysisProfileV3 {
   localPasses: readonly ['local-sast']
   scoreStatus: 'not-computed'
 }
+/** The v4 shape, retained so request-source-only-SQL receipts still parse. */
+export interface LegacyLocalAnalysisProfileV4 {
+  id: 'local-registry-v4'
+  omittedPasses: readonly ['graph']
+  localPasses: readonly ['local-sast']
+  scoreStatus: 'not-computed'
+}
 export type AnyLocalAnalysisProfile =
   | LocalAnalysisProfile
   | LegacyLocalAnalysisProfileV1
   | LegacyLocalAnalysisProfileV2
   | LegacyLocalAnalysisProfileV3
+  | LegacyLocalAnalysisProfileV4
 
 export interface CliConfig {
   version: 1

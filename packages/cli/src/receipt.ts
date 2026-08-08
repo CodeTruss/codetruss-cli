@@ -105,12 +105,59 @@ function analysisProfileLines(receipt: Receipt): string[] {
   if (current.id === 'local-registry-v1') return omittedSastProfileLines(receipt, current.id)
   if (current.id === 'local-registry-v2') return thirteenAnalyzerProfileLines(receipt, current.id)
   if (current.id === 'local-registry-v3') return jsOnlySastProfileLines(receipt, current.id)
+  if (current.id === 'local-registry-v4') return requestSourceSqlProfileLines(receipt, current.id)
 
   const python = pythonCoverage(receipt)
   return [
     '## Analysis profile',
     '',
     `Profile: \`${current.id}\`.`,
+    '',
+    `The 15 deterministic registry analyzers ran locally on this machine, plus a local security pass: the shared SAST engine — the same rules and the same source-to-sink taint tracking as the hosted audit — over the ${python.analyzed ? 'JavaScript, TypeScript, TSX and Python' : 'JavaScript, TypeScript and TSX'} in this repository.`,
+    '',
+    '### What the local security pass checked',
+    '',
+    '- **SQL injection (CWE-89).** Untrusted input tracked from request sources through string building into query execution. Separately, and at HIGH rather than CRITICAL, a query whose entire text is one of the enclosing function\'s parameters: nothing in that file constrains it and no call site in that file binds it to a constant or a parameterized template, so whether it is injectable is decided by callers this pass cannot see.',
+    '- **Mass assignment (CWE-915).** A raw request body spread into a database write, and write helpers whose payload type accepts arbitrary keys.',
+    '- **Un-awaited database writes, swallowed errors, coercion-prone `==` comparisons, and N+1 queries in loops** — the defect classes coding agents most often introduce.',
+    ...(python.analyzed ? [
+      `- **The complete rule pack over ${python.scanned} Python file(s).** The installed grammar pack is the same \`web-tree-sitter\` runtime and the same compiled grammar the hosted audit loads, so Python here was checked by the hosted machinery rather than an approximation of it — including the injection, traversal, SSRF and deserialization classes the JavaScript subset below omits.`,
+    ] : []),
+    '',
+    '### What did not run',
+    '',
+    `- **The rest of the security rule pack${python.analyzed ? ', for JavaScript, TypeScript and TSX' : ''}.** Command injection, code injection, path traversal, SSRF, open redirect, XSS and insecure deserialization were **not** checked ${python.analyzed ? 'in those languages' : 'here'}. Those rules run in a hosted scan; absence of a finding in those classes means they were not analyzed, not that the code is clean.`,
+    ...pythonDisclosureLines(python),
+    '- **Hosted symbol graph.** No cross-file call or data-flow graph was built, so architecture and dead-code conclusions cover only what the local passes can see in isolation.',
+    '- **Abstraction-shape analysis.** Single-implementation interfaces, options nobody overrides, and parameters never varied at any call site were not checked. They require the cross-file symbol graph, which does not run locally. This receipt says nothing either way about those shapes.',
+    ...(receipt.llm ? [] : [
+      '- **Optional LLM review.** No model read this diff. It is opt-in via `--llm` and is force-disabled under agent hooks, so a hook receipt is always deterministic evidence only.',
+    ]),
+    '- **Hosted Health scores.** Not calculated, reported as **N/A**. The scores are defined over the graph and the complete SAST pass; a number derived from this pass set would overstate what ran.',
+    '',
+    'Local security findings are reported for review and do not fail the verdict on their own.',
+    '',
+    'A PASS verdict means the passes listed above never ran and the passes that did run found nothing new. It is not a statement that this change is secure.',
+    '',
+    '[Run a hosted full audit](https://codetruss.com/dashboard/repos/new?source=cli-receipt).',
+  ]
+}
+
+/**
+ * The frozen `local-registry-v4` block.
+ *
+ * Byte-identical to what CLI 0.2.40–0.2.52 signed. v5 supersedes it because the
+ * SQL bullet became untrue: those releases reported CWE-89 only for taint
+ * traced from a request source, and 0.2.53 also reports a query whose whole text
+ * is a caller-supplied parameter. A receipt signed by one of those releases must
+ * keep rendering the sentence it was signed with.
+ */
+function requestSourceSqlProfileLines(receipt: Receipt, profileId: string): string[] {
+  const python = pythonCoverage(receipt)
+  return [
+    '## Analysis profile',
+    '',
+    `Profile: \`${profileId}\`.`,
     '',
     `The 15 deterministic registry analyzers ran locally on this machine, plus a local security pass: the shared SAST engine — the same rules and the same source-to-sink taint tracking as the hosted audit — over the ${python.analyzed ? 'JavaScript, TypeScript, TSX and Python' : 'JavaScript, TypeScript and TSX'} in this repository.`,
     '',
