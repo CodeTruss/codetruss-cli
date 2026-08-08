@@ -25,8 +25,18 @@ pre-commit plus Claude/Codex hooks, and runs a health check. It never defaults
 to a repository-wide allow rule, never treats `--yes` as command trust, and
 never uploads anything. Codex asks for one final project-hook approval in
 `/hooks`.
-Non-interactive `--yes` setup requires explicit `--allow` values and still
-requires `--trust-verify` before it can trust detected repository commands.
+Non-interactive `--yes` setup does not require `--allow`. With no explicit
+value it adopts every conventional source directory that exists at the
+repository root — `src`, `app`, `apps`, `packages`, `lib`, `components`,
+`server`, `client`, `public`, `test`, `tests`, `e2e`, `spec`, `docs` — as
+`<dir>/**`, prints what it adopted, and continues; it refuses only when none of
+them exist, and then asks for an explicit `--allow`. So an unattended run gets a
+scope derived from the repository rather than one you chose: possibly wider than
+you want, and blind to a source directory outside that list (`source/**`, for
+one), which makes ordinary changes read as out of scope. Pass `--allow` whenever
+the scope matters — explicit values are used verbatim and nothing is detected.
+`--trust-verify` is still required before `--yes` can trust detected repository
+commands.
 
 A 14-day local-only design-partner cohort is open without repository access,
 an account, or receipt sync. The consent request is:
