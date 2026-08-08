@@ -5,6 +5,110 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.55 — 2026-08-08
+
+Nine green CI contexts gated every release before this one, and none of them could
+see a rule.
+
+The public mirror carries `packages/cli/` and `packages/analyzer-engine/`'s
+`package.json` and `src`. It carries no root `tests/`, and `analyzer-engine` has no
+test directory to carry. The rule-level SAST suites live in the monorepo —
+`tests/sast-regressions.test.ts` exercises the hosted `@/lib/security/**`
+implementation, and `tests/analyzer-engine-parity.test.ts` is what binds that
+implementation to the shipped engine — and neither reaches the mirror. What the nine
+OS × Node contexts and the tag-triggered release job verified was **packaging**: a
+reproducible archive, a verifier that rejects tampering, a changelog chain, a README
+whose profile id matches the code. A SAST behaviour regression could pass all nine.
+
+That is not hypothetical. Both 0.2.53 fixes were confirmed by an acceptance check run
+by hand, and the false positive one of them removed had already shipped.
+
+- **The release now runs the shipped binary over fixtures before it is a release.**
+  `packages/cli/scripts/test-acceptance.mjs` executes the built `dist/cli.cjs` — not
+  `src/`, not the hosted implementation — over the committed tree in
+  `scripts/fixtures/acceptance/`, and asserts the findings the release must and must
+  not produce. It joins `test-deterministic-package.mjs`, `test-release-verifier.mjs`
+  and `test-changelog-policy.mjs` in this package's `test` script, so it runs in all
+  nine compatibility contexts and in the release job, from inside the mirror, with no
+  hosted code present.
+
+  Two fixtures, both single file shapes, both reproducing findings recorded in
+  `docs/benchmarks/cross-tool-2026-08/adjudication/verdicts.md`. A drizzle `` sql`…` ``
+  tagged template with interpolations, which must NOT be reported (it was CWE-89
+  CRITICAL until 0.2.53). And `client.query(param, …)` on a database-shaped receiver,
+  which must be reported at HIGH on the `client.query` line (silent until 0.2.53;
+  Semgrep caught it and we did not).
+
+  The check was verified in both directions rather than assumed: reverting the 0.2.53
+  tagged-template exemption turns it red with the original `CRITICAL sql-injection at
+  src/db/rpc.ts`, and reverting the caller-supplied-argument report turns it red with
+  zero findings where one is required.
+
+  The ten benchmark repositories are deliberately not cloned. Minutes of network across
+  nine contexts, and a release that would depend on third-party repositories staying up.
+
+- **It refuses to test a bundle that is not this release.** A test that read `src/`
+  would recreate the gap it exists to close, so the script checks `dist/cli.cjs
+  --version` against `package.json` and refuses to run if any file under
+  `packages/cli/src` or `packages/analyzer-engine/src` is newer than the bundle. Both
+  refusals were demonstrated: the published 0.2.53 `dist/cli.cjs` is rejected by
+  version, and a touched rule source is rejected as unbuilt.
+
+  Fixtures are committed with a `.fixture` suffix and materialized at run time, so the
+  repository's own lint and typecheck programs never compile deliberately vulnerable
+  code, and the analyzer still sees `.ts` and `.js` where it matters.
+
+- **`CONTRIBUTING.md` now says what mirror CI verifies.** It described the artifact and
+  grammar-pack verifiers accurately and left the rest to inference, and the inference
+  everyone drew — nine green contexts mean the release behaves — was wrong until this
+  entry.
+
+No analyzer, rule, or receipt behaviour changes in this release. The archive differs
+from 0.2.54 only in the changelog it carries.
+
+## 0.2.54 — 2026-08-08
+
+The 0.2.53 archive contradicted itself. `README.md` said receipts identify the
+15-pass `local-registry-v4` profile; `CHANGELOG.md`, packed beside it in the same
+tarball, said the profile is `local-registry-v5`. The pass count was right and
+the profile bump was right — only the identifier in the README was stale,
+because the 0.2.53 commit changed `LOCAL_ANALYSIS_PROFILE.id` and never touched
+the prose that restates it.
+
+**The published 0.2.53 bytes are unchanged.** They are tagged, attested, and
+served; the correction ships here.
+
+- **The README states the current profile id.** `packages/cli/README.md` now
+  reads `local-registry-v5`. Three further copies outside the archive said `v4`
+  for the same reason and are corrected too: the monorepo `README.md` (twice) and
+  `docs/codetruss-cli-guide.md`, including the sample receipt's profile line.
+
+- **A build step now fails when the README's profile id or analyzer count does
+  not match the code.** This is the second escape of exactly this defect — the
+  README carried `local-registry-v3` after v4 shipped, corrected in 0.2.44 — so
+  the identifier is no longer maintained by hand alone.
+  `scripts/docs-profile-policy.mjs` reads `LOCAL_ANALYSIS_PROFILE.id` from
+  `packages/cli/src/types.ts` and the analyzer count from `ANALYZERS` in
+  `packages/analyzer-engine/src/registry.ts`, and `build-release.mjs` asserts the
+  README agrees with both — beside `assertChangelogPolicy`, guarding the
+  CHANGELOG's peer in the same eight-file archive, and before any archive bytes
+  exist, because this script refuses to overwrite an already-written versioned
+  tarball. It runs wherever a release is built, including all nine CI
+  compatibility contexts and the tag-triggered release job.
+
+  The extractor reads TypeScript textually, because the release build runs under
+  plain Node and cannot import it. That seam is closed rather than trusted: it
+  throws instead of guessing when either source stops parsing, and
+  `tests/docs-profile-claims.test.ts` imports the real constants and asserts the
+  extracted values equal them. That test also guards the two monorepo documents,
+  which never reach the archive.
+
+  What separated the strings 0.2.53 updated from the strings it missed was not
+  care, it was coverage: the marketing demo string was updated because a test
+  asserts it contains `LOCAL_ANALYSIS_PROFILE.id`, and the receipt page copy was
+  updated because a zod literal would not compile otherwise. Every restatement
+  nothing checked stayed stale.
+
 ## 0.2.53 — 2026-08-08
 
 We published what we missed. This release publishes what we got wrong.

@@ -77,7 +77,7 @@ contacts the session endpoint to verify the saved credential, and `auth logout`
 contacts it to revoke the credential before deleting the local copy; neither
 sends source, patches, or receipts. `--llm --provider anthropic|openai|claude`
 opts into provider review using your API key or authenticated local Claude Code.
-Local receipts identify the 15-pass `local-registry-v4` profile and show hosted
+Local receipts identify the 15-pass `local-registry-v5` profile and show hosted
 Health scores as N/A. Its local security pass covers JavaScript, TypeScript, and
 TSX, plus Python when the optional grammar pack is installed; each receipt states
 which of those actually ran rather than assuming. The hosted symbol graph and the
