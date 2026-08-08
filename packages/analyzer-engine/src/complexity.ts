@@ -1,6 +1,7 @@
 import {
   annotatedAnalyzerOutput,
   incompleteAnalyzerOutput,
+  measuredCoverage,
   type Analyzer,
   type AnalyzerFinding,
 } from './types'
@@ -164,7 +165,10 @@ export const complexityAnalyzer: Analyzer = {
     if (candidates.length > candidateLimit) {
       return incompleteAnalyzerOutput(output, {
         truncated: true,
-        detail: `Complexity analysis hit a candidate bound (${candidates.length} candidate files, ${findings.length} matches).`,
+        // The filter ran over the whole tree before the slice, so the files the
+        // bound cut are counted, not merely unknown.
+        coverageRatio: measuredCoverage(candidateLimit, candidates.length),
+        detail: `Complexity analysis measured ${candidateLimit} of ${candidates.length} candidate files (${findings.length} matches).`,
         metrics: { candidates: candidates.length, candidateLimit, matches: findings.length, findingLimit },
       }, withheld)
     }

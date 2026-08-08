@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import {
   annotatedAnalyzerOutput,
   incompleteAnalyzerOutput,
+  measuredCoverage,
   type Analyzer,
   type AnalyzerFinding,
 } from './types'
@@ -78,7 +79,10 @@ export const duplicationAnalyzer: Analyzer = {
     if (candidates.length > candidateLimit) {
       return incompleteAnalyzerOutput(output, {
         truncated: true,
-        detail: `Duplication analysis hit a candidate bound (${candidates.length} candidate files, ${findings.length} matches).`,
+        // The filter ran over the whole tree before the slice, so the files the
+        // bound cut are counted, not merely unknown.
+        coverageRatio: measuredCoverage(candidateLimit, candidates.length),
+        detail: `Duplication analysis compared ${candidateLimit} of ${candidates.length} candidate files (${findings.length} matches).`,
         metrics: { candidates: candidates.length, candidateLimit, matches: findings.length, findingLimit },
       }, withheld)
     }

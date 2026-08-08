@@ -7,6 +7,7 @@ import {
   dottedName,
   identifierName,
   interpolationExprs,
+  paramBoundNames,
   stringLiteralValue,
   subscriptBase,
   unwrap,
@@ -69,6 +70,47 @@ const REQUEST_ROOTS = new Set([
   'req', 'request', 'ctx', 'context', 'httprequest', 'httpcontext', 'event', 'args',
   '$_get', '$_post', '$_request', '$_cookie', '$_server', 'params', 'searchparams',
 ])
+/**
+ * Request roots whose NAME alone establishes nothing.
+ *
+ * `event`, `args`, `context`, `params` and `ctx` are ordinary local and loop
+ * names in ordinary code. `for (const event of salesforceEvents)` made every
+ * `event.<anything>` an untrusted source, so rows already read back from a CRM
+ * were treated as attacker input — three CRITICAL injection reports out of one
+ * loop variable. So these count as a request object only when the enclosing
+ * function BOUND them, positionally or by destructuring.
+ *
+ * The unambiguous roots are deliberately left ungated: nobody names a loop
+ * variable `req`, `httpRequest` or `$_GET`, and a framework that hands a
+ * request to a non-parameter binding still reaches those.
+ *
+ * Recall cost, stated rather than hidden: a handler that destructures its
+ * request into a LOCAL named `event` — `const event = JSON.parse(body)` — or a
+ * serverless adapter that binds the request through a module-level variable
+ * loses the source, and every finding that depended on it. That is a real
+ * narrowing, accepted because the name alone was never evidence.
+ */
+const PARAM_BOUND_REQUEST_ROOTS = new Set(['event', 'args', 'context', 'params', 'ctx'])
+
+/** Names the enclosing function's signature bound, for the ambiguous-root gate. */
+export interface TaintScope {
+  paramNames: ReadonlySet<string>
+}
+
+/**
+ * Whether `name` denotes an untrusted request object in the given scope.
+ *
+ * `scope` is undefined for callers that recognize request SHAPES without a
+ * function context (the navigation-target predicate in rules.ts). Those keep
+ * the pre-gate answer: they consult this only to decide whether an already-
+ * tainted value IS the request rather than something built from it, so
+ * narrowing them would change a measured predicate for no stated defect.
+ */
+function isRequestRoot(name: string, scope?: TaintScope): boolean {
+  if (!REQUEST_ROOTS.has(name)) return false
+  if (!PARAM_BOUND_REQUEST_ROOTS.has(name)) return true
+  return scope ? scope.paramNames.has(name) : true
+}
 /** Member properties on a request object that expose untrusted data. */
 const REQUEST_PROPS = new Set([
   'query', 'body', 'params', 'cookies', 'headers', 'form', 'get', 'post', 'data',
@@ -139,7 +181,7 @@ const READER_SOURCE_METHODS = new Set([
 const READER_RECEIVER = /reader|stream|buffer|^(br|rdr)$/
 
 /** If the expression is an untrusted source, return its kind label. */
-export function sourceKindOf(node: SyntaxNode, lang: SastLanguage): string | null {
+export function sourceKindOf(node: SyntaxNode, lang: SastLanguage, scope?: TaintScope): string | null {
   // `await params` / `await searchParams` — Next 15+ async route/page props.
   // Checked on the RAW node because unwrap() strips the await. Awaiting a bare
   // identifier with exactly these names is a strong framework signal; ordinary
@@ -166,23 +208,28 @@ export function sourceKindOf(node: SyntaxNode, lang: SastLanguage): string | nul
     if (
       (method === 'json' || method === 'text' || method === 'formdata') &&
       call.receiverName &&
-      REQUEST_ROOTS.has(call.receiverName.toLowerCase())
+      isRequestRoot(call.receiverName.toLowerCase(), scope)
     ) {
       return `${call.receiverName}.${method}()`
     }
     // next/headers cookies() — every cookie value is attacker-controlled.
+    // useSearchParams()/useParams() — the client-side equivalents: both read
+    // straight off the URL. These are named here rather than inferred from the
+    // variable they land in, which is what makes the parameter-binding gate on
+    // `params` affordable: `const params = useSearchParams()` is a local, so
+    // the name proves nothing, but the CALL proves everything.
     if (
-      method === 'cookies' &&
+      (method === 'cookies' || method === 'usesearchparams' || method === 'useparams') &&
       !call.receiverName &&
       !call.isConstruct &&
       (lang === 'javascript' || lang === 'typescript' || lang === 'tsx')
     ) {
-      return 'cookies()'
+      return method === 'cookies' ? 'cookies()' : `${call.method}()`
     }
     // Getter calls on a request-shaped root: searchParams.get('q'),
     // params.get(…). The member branch below already treats `<root>.anything`
     // as a source, so this adds no exposure the member form doesn't have.
-    if (method === 'get' && call.receiverName && REQUEST_ROOTS.has(call.receiverName.toLowerCase())) {
+    if (method === 'get' && call.receiverName && isRequestRoot(call.receiverName.toLowerCase(), scope)) {
       return `${call.receiverName}.get`
     }
     // bare input() in python
@@ -207,8 +254,8 @@ export function sourceKindOf(node: SyntaxNode, lang: SastLanguage): string | nul
   if (m) {
     const rootName = rootIdentifier(n, lang)?.toLowerCase()
     const prop = m.property.toLowerCase()
-    if (rootName && REQUEST_ROOTS.has(rootName) && REQUEST_PROPS.has(prop)) return `${rootName}.${prop}`
-    if (rootName && REQUEST_ROOTS.has(rootName)) return rootName // req.<anything>.x
+    if (rootName && isRequestRoot(rootName, scope) && REQUEST_PROPS.has(prop)) return `${rootName}.${prop}`
+    if (rootName && isRequestRoot(rootName, scope)) return rootName // req.<anything>.x
     // Go: r.URL / r.Header / r.Body etc. — request fields, gated on a
     // request-shaped root so a *sql.Rows named `r` is not caught.
     if (lang === 'go' && rootName && GO_REQUEST_ROOTS.has(rootName) && GO_REQUEST_MEMBERS.has(prop)) {
@@ -274,6 +321,8 @@ function isSanitizer(call: NCall): boolean {
 
 interface Env {
   lang: SastLanguage
+  /** Names this function's signature bound — gates the ambiguous request roots. */
+  scope: TaintScope
   taint: Map<string, Origins>
   /** Remaining node-visit budget for the current phase (fixpoint solve, then
    *  sink queries). Each evalOrigins visit accesses web-tree-sitter node
@@ -304,7 +353,7 @@ function evalOrigins(node: SyntaxNode, env: Env, depth = 0): Origins {
 
   // 1. direct source? (raw node — sourceKindOf needs to see `await params`
   // before unwrap strips the await; it unwraps internally for everything else)
-  const src = sourceKindOf(node, lang)
+  const src = sourceKindOf(node, lang, env.scope)
   if (src) return [{ kind: 'source', sourceKind: src, node: n }]
 
   // 2. calls
@@ -318,6 +367,24 @@ function evalOrigins(node: SyntaxNode, env: Env, depth = 0): Origins {
     // req.url))` idiom, not an open redirect or SSRF. Trade-off: the rare
     // `new URL('/fixed', attackerControlledBase)` host injection is suppressed too.
     if (call.fullName.toLowerCase() === 'url' && stringLiteralValue(call.args[0], lang) !== null) return []
+    // `new URLSearchParams({ … })` is a query-string BUILDER, and its
+    // serialization is application/x-www-form-urlencoded: every character that
+    // could carry structure — '/', ':', '<', '&', '=', '?', '#' — comes back
+    // percent-encoded. A value put in this way can only ever emerge as an
+    // encoded query VALUE, so it can reach neither an origin nor a markup
+    // context. Gated on the object-literal argument form, which is the builder:
+    // `new URLSearchParams(location.search)` PARSES instead, and reading a
+    // value back out of it is the DOM-XSS shape, so that form keeps its taint.
+    // Residual unsoundness: `.get()` on a builder returns the value decoded
+    // again. That round trip is a no-op nobody writes.
+    if (
+      call.isConstruct &&
+      call.fullName.toLowerCase() === 'urlsearchparams' &&
+      call.args[0] &&
+      unwrap(call.args[0], lang).type === 'object'
+    ) {
+      return []
+    }
     let acc: Origins = []
     if (call.receiver) acc = mergeOrigins(acc, evalOrigins(call.receiver, env, depth + 1))
     for (const a of call.args) acc = mergeOrigins(acc, evalOrigins(a, env, depth + 1))
@@ -393,7 +460,12 @@ export interface FunctionTaint {
  */
 export function analyzeFunction(fn: NFunc, lang: SastLanguage): FunctionTaint {
   const taint = new Map<string, Origins>()
-  const env: Env = { lang, taint, budget: TAINT_VISIT_BUDGET, exhausted: false }
+  // Lower-cased because every root lookup in sourceKindOf is lower-cased —
+  // `searchParams` must still match the `searchparams` root.
+  const paramNames = new Set(
+    [...paramBoundNames(fn.node)].map((p) => p.toLowerCase()),
+  )
+  const env: Env = { lang, scope: { paramNames }, taint, budget: TAINT_VISIT_BUDGET, exhausted: false }
 
   // Seed parameters so we can learn which ones reach sinks.
   fn.params.forEach((p, i) => {

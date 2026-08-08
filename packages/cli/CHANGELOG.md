@@ -5,6 +5,210 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.50 — 2026-08-08
+
+- **`dead-code` spent 26 of this analysis's 27 seconds and bought nothing with
+  them.** The pass concatenated every indexed JS/TS file into a single string —
+  18.2 MB on `calcom/cal.com` — and then ran one regular expression per
+  candidate module against the whole of it. That is O(candidates × corpus
+  bytes): 1,500 sweeps of an 18 MB string, roughly 64 GB of scanning, to decide
+  1,500 yes/no questions. And it bought nothing, because the pass has been
+  saturated at its 20-finding output cap the entire time — more scanning changed
+  only *which* candidates were examined, never how many findings came out. It
+  now reads the corpus twice, building one index of the filename stems the
+  repository actually references, and answers each candidate with a set lookup.
+  On `calcom/cal.com@b2c28a23` (7,691 files, 517,420 LOC) `dead-code` drops from
+  25.8s to 0.03s and the whole deterministic analyzer phase from 27.3s to 1.5s.
+
+  **The findings are unchanged, and that was checked rather than assumed.** The
+  old expression matched a filename stem wherever it appeared — inside strings,
+  inside comments, inside unrelated tokens — and a tidier index that quietly
+  stopped doing so would start reporting live modules as dead. So the
+  replacement reproduces that looseness exactly. On four pinned repositories
+  (cal.com, astro, TanStack/query, hono) the reported findings, the findings
+  withheld behind the cap, the completeness flags and the pass metrics are
+  byte-identical before and after, and a differential run against the original
+  expression agrees on all 60,600 generated cases. A stem containing whitespace
+  or a quote character can still straddle the delimiters the index keys on, so
+  those candidates keep the original whole-corpus test; no real filename needs
+  it, and the fallback exists so the rewrite cannot narrow the rule by accident.
+
+## 0.2.49 — 2026-08-08
+
+- **A redirect to a path this codebase wrote itself was reported as an open
+  redirect, and on one real repository seventeen of nineteen such reports were
+  false.** 0.2.45 widened the open-redirect sink to JSX `href`/`action`,
+  `location.assign|replace|href` and `router.push|replace`, and that widening
+  was narrowed against this repository alone. An open redirect requires the
+  attacker to control the ORIGIN — the host, or the leading `//` or scheme that
+  decides it — and two shapes cannot reach it. `new URL(reference, base)`
+  resolves by WHATWG rules, so any reference that is not itself absolute takes
+  the base's origin and the origin question collapses onto the first argument;
+  the head-position analysis that already answers exactly that question for a
+  template or a concatenation now re-asks itself there instead of treating the
+  construction as opaque. `new URLSearchParams({ … })` is a query-string
+  builder whose serialization is `application/x-www-form-urlencoded`, so `/`,
+  `:`, `<`, `&`, `=`, `?` and `#` all come back percent-encoded and a value put
+  in this way can only ever emerge as an encoded query value. On `calcom/cal.com`
+  the open-redirect count falls from 19 to 12, on `vercel/commerce` from 1 to 0,
+  on `shadcn-ui/taxonomy` from 1 to 0, and six further SaaS repositories produce
+  byte-identical findings before and after.
+
+  What still fires, deliberately: `new URL(req.query.next, req.url)`, because a
+  bare reference may be absolute and override the base; a protocol-relative
+  reference, which discards the base origin; `new URL(x)` with one argument,
+  where `x` is the whole URL; and `new URLSearchParams(location.search)`, which
+  PARSES rather than builds, so reading a value back out of it keeps its taint.
+  Writing a tainted value into a query string is safe; reading one out and using
+  it as the target is the vulnerability, and that direction is unchanged.
+
+  Recall cost, stated plainly: a redirect whose reference begins with a literal
+  `/` is no longer reported however tainted the rest of it is, which takes
+  `new URL('/fixed', attackerControlledBase)` host injection with it — the same
+  trade-off `evalOrigins` already documented for the constant case. Neither
+  suppression can be reached through a local variable, so
+  ``const u = `/x/${t}`; res.redirect(u)`` is still reported.
+
+## 0.2.48 — 2026-08-07
+
+- **Ten bounded passes said "truncated" without ever learning what they were
+  truncated out of, so the largest repositories got no score at all.** A
+  required pass that stopped early is not authoritative, and the only way back
+  is to show it still covered enough of its input. An output cap could never
+  show that: it stops at N and never counts past N, so no denominator exists and
+  the gate has to assume the worst. On a 7,690-file, 517k-LOC repository ten
+  required passes tripped a cap — acquisition, the symbol graph, the knowledge
+  graph, and the duplication, secrets, dead-code, complexity, vulnerabilities,
+  comment-slop and speculative-structure analyzers — and all five score axes
+  were withheld. Nobody decided that; it fell out of the arithmetic, and it got
+  more certain the bigger the repository was.
+
+  Every one of those caps now reports what it cost, in the unit it bounds.
+  Candidate-file bounds (duplication, dead-code, complexity, comment-slop,
+  speculative structure) divide the files they examined by the files the filter
+  produced — both numbers already existed, one slice apart. The secret scan and
+  the TODO scan keep counting after they stop collecting, so they report matches
+  shown over matches found. The vulnerability pass reports manifests read over
+  manifests present, and package versions checked over package versions
+  declared, whichever is worse. Acquisition divides the archive entries it wrote
+  by the entries it saw. The symbol graph reports files parsed over candidate
+  files and call sites kept over call sites found; the knowledge graph counts
+  the distinct nodes and edges its caps refuse, so those have denominators too.
+
+  What this is not: a way to publish a score that should be withheld. The
+  threshold is unchanged at 95%, no pass gained a path around it, and a cap that
+  still cannot name its denominator still claims nothing and still voids the
+  score. The change is that a pass which CAN name it now does, so the existing
+  gate can tell one oversized archive entry in 7,690 apart from an analyzer that
+  lost half its findings. A repository whose secret scan reported 500 of 5,000
+  matches is withheld exactly as it was before — and now says so in those words.
+
+- **`vulnerabilities` withheld every score with a reason that said nothing had
+  been lost.** The pass truncated on the dependency-manifest bound and then
+  reported package-version coverage, which was complete: "covered 181 of 181
+  package versions", printed as the justification for publishing no score at
+  all. Two independent bounds share that pass, and only one of them was ever
+  described. Each bound that bites is now named in its own unit — "read 5 of 92
+  dependency manifests", "checked 200 of 400 declared package versions" — and
+  the coverage claimed is the worst of them.
+
+- The secret scan's reported coverage is the fraction of MATCHES shown rather
+  than the fraction of files read, superseding the file-fraction measure added
+  in 0.2.47. Both answer "how much did the cap cost", but only the match count
+  answers it in findings: the file measure reads 100% whenever the cap is
+  reached on the last file scanned, and 2% when it is reached on the first,
+  neither of which is the number of credentials a reader cannot see. The sweep
+  no longer stops at the cap, which costs one more pass over a tree the scanner
+  already sweeps in full whenever the cap is not reached.
+
+- The TODO pass counted markers only up to its 500-marker retention bound, so
+  its headline finding — a count — reported the bound instead of the codebase on
+  any repository above it. The count is now exact; the bound governs only which
+  markers get individual findings.
+
+## 0.2.47 — 2026-08-07
+
+- **A loop variable named `event` was treated as an HTTP request.** The taint
+  engine decided an expression was untrusted input by looking at the NAME of the
+  root identifier: `event`, `args`, `context`, `params` and `ctx` were on the
+  request-root list alongside `req` and the PHP superglobals, and nothing
+  checked that a parameter had actually bound the name. In a 517k-LOC codebase
+  we scanned, `for (const event of salesforceEvents)` made every
+  `event.<anything>` a source, and the three CRITICAL SQL-injection reports that
+  came out of that one loop were 39% of the repository's entire security
+  deduction. The rows were already inside the database they were said to be
+  injecting into. Those five ambiguous roots now count as a request only when
+  the enclosing function's signature bound them, positionally or by
+  destructuring (`({ ctx, input })` is how most handlers are written, so the
+  gate sees through patterns). The unambiguous roots are untouched: nobody names
+  a loop variable `req` or `$_GET`.
+
+  The narrowing is real and we are not hiding it. A handler that lands its
+  request in a LOCAL named `event` — `const event = JSON.parse(body)` — or a
+  serverless adapter that binds it through a module-level variable now loses the
+  source, and every finding that depended on it. The one shape that mattered in
+  practice, `const params = useSearchParams()`, is covered again by treating
+  `useSearchParams()` and `useParams()` as sources in their own right: the call
+  is evidence, the variable's name never was.
+
+- **Placeholder detection could bless a real key, and did it silently.** Two
+  compounding defects. The words that mark a value as fake were matched anywhere
+  inside it, so `xxx` occurring by chance inside a random credential silenced
+  the line — measured against 400 real `generateKeyPairSync` RSA-2048 keys, 18
+  of them (4.5%) contain a matching run. And the check ran against the whole
+  regex match rather than the value, so `examplePassword = "<real secret>"` was
+  dismissed because of the identifier next to it. Every alternative is now
+  anchored to a token boundary, the pre-existing ones included, and the subject
+  is the extracted quoted value. Private key blocks are excluded from
+  value-level matching entirely — a base64 PEM body is a high-entropy blob, not
+  a string that can announce itself as fake — so the 4.5% collision cannot reach
+  the "No action needed." path by another route. The same 400 keys now produce
+  zero matches. `mock`, `stub`, `test-key`/`test-secret` and `not-a-real` join
+  the list as genuine placeholder forms.
+
+  Consequence worth knowing before you upgrade: a credential-shaped string that
+  merely CONTAINS a word like `fake` inside its random body is no longer
+  downgraded to INFO. `sk_live_51QxR8fake2eKjL9…` is indistinguishable from a
+  live key by any rule that does not simply trust a substring, so it is reported
+  rather than blessed. Announce a placeholder with delimiters
+  (`sk_live_test-key-…`, `not-a-real-password`) and it is recognised as before.
+
+- **A placeholder declared one line up was invisible.** The placeholder check
+  read a single line, so a Swagger `@ApiProperty({ example: { … } })` two lines
+  above a documentation sample did not cover it and the sample was reported as a
+  committed leak. A placeholder marker that opens a block now covers that block,
+  which ends at the first non-blank line indented no further than the opener.
+
+- **Findings were double-charged, and repeats were charged in full.** Scoring
+  summed severity weights flat. Eight firings of one rule against one mock
+  string in one spec file cost eight findings — 14% of one repository's security
+  deduction for a single review decision — and a hard-coded credential found by
+  both the secrets analyzer and the SAST rule was charged twice for one line.
+  Repeat hits of the same rule in the same file now decay to `1 + ln(n)`, with
+  the worst finding in the group still charged in full, and `(filePath, line)`
+  is deduped across analyzers. The finding LIST is unchanged — both entries
+  still appear, with their own evidence and their own fix; only the arithmetic
+  collapses them.
+
+  The cost lands on concentration: a file with twelve DISTINCT injection sinks
+  now prices close to a file with one, and two genuinely different defects on
+  one line price as one. Concentration is legitimate signal and most of it is
+  lost from the score. It remains visible in the findings.
+
+- **The secret scan stopped at 50 matches and took every score down with it.**
+  50 was reached exactly on a 517k-LOC repository, which made every count anyone
+  quoted a truncated prefix — and because a truncated required pass is not
+  authoritative, a benign cap withheld all five score axes. The cap is now 500,
+  and the pass reports the fraction of its eligible files it actually read, so
+  an immaterial cap no longer voids the scores while a real coverage loss still
+  does.
+
+- Known, unchanged: the `Private key block` pattern matches only the PEM header,
+  so anything that inspects the matched text sees `-----BEGIN PRIVATE KEY-----`
+  and never the body. That is why the exclusion above is written by credential
+  type rather than by trusting the value check to hold over 1,700 random
+  characters.
+
 ## 0.2.46 — 2026-08-07
 
 - **A repository's own scope globs could crash the review that reads them.**

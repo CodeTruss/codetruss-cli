@@ -1,6 +1,7 @@
 import {
   annotatedAnalyzerOutput,
   incompleteAnalyzerOutput,
+  measuredCoverage,
   type Analyzer,
   type AnalyzerFinding,
 } from './types'
@@ -430,7 +431,10 @@ export const commentSlopAnalyzer: Analyzer = {
     if (candidates.length > candidateLimit) {
       return incompleteAnalyzerOutput(findings, {
         truncated: true,
-        detail: `Comment analysis hit a candidate bound (${candidates.length} candidate files).`,
+        // The filter ran over the whole tree before the slice, so the files the
+        // bound cut are counted, not merely unknown.
+        coverageRatio: measuredCoverage(candidateLimit, candidates.length),
+        detail: `Comment analysis measured ${candidateLimit} of ${candidates.length} candidate files.`,
         metrics: { ...metrics, candidates: candidates.length, candidateLimit },
       }, withheld)
     }

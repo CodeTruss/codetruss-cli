@@ -560,16 +560,43 @@ const PATH_ANCHOR = /^(\/(?!\/)|[?#])/
 const AUTHORITY_OPENER = /^([a-z][a-z0-9+.-]*:)?\/\//i
 
 /**
- * Position-aware suppression for head-position sinks (SSRF). A URL built as a
- * template/concat is only attacker-steerable when taint can reach its scheme/
- * authority: suppress when a constant head pins the authority (or is a
- * single-slash relative path), or when the head expression is untainted (e.g.
- * a `${BASE}` config var) and every tainted part lands after a path-anchoring
- * constant fragment. Deliberately conservative — an empty, protocol-relative
- * ('//') or incomplete-host ('http://', 'http://a') prefix, or a tainted head,
- * still flags, and a non-template/concat argument is never suppressed.
+ * The relative reference of `new URL(reference, base)`, or null when the shape
+ * does not apply.
+ *
+ * WHATWG resolution makes the base supply the origin for every reference that
+ * is not itself absolute, so the origin-position question collapses onto the
+ * FIRST argument and the base drops out: `new URL('/booking/' + uid, WEBAPP_URL)`
+ * lands on WEBAPP_URL's origin no matter what `uid` holds. A single argument is
+ * not this shape — there is no base, so that argument is the whole URL.
+ *
+ * The base is not re-examined, matching the constant-first-argument carve-out
+ * in `evalOrigins`: `new URL('/login', req.url)` is the Next.js middleware
+ * idiom, and the same trade-off (a host injection through an attacker-chosen
+ * base is suppressed too) is accepted here for the same reason.
  */
-function headTaintSuppressed(arg: SyntaxNode, ft: FunctionTaint, lang: SastLanguage): boolean {
+function urlBaseRelativeReference(arg: SyntaxNode, lang: SastLanguage): SyntaxNode | null {
+  const call = asCall(arg, lang)
+  if (!call || !call.isConstruct || call.fullName.toLowerCase() !== 'url') return null
+  return call.args.length >= 2 ? call.args[0] ?? null : null
+}
+
+/**
+ * Position-aware suppression for head-position sinks (SSRF, open redirect). A
+ * URL built as a template/concat is only attacker-steerable when taint can
+ * reach its scheme/authority: suppress when a constant head pins the authority
+ * (or is a single-slash relative path), or when the head expression is
+ * untainted (e.g. a `${BASE}` config var) and every tainted part lands after a
+ * path-anchoring constant fragment. Deliberately conservative — an empty,
+ * protocol-relative ('//') or incomplete-host ('http://', 'http://a') prefix,
+ * or a tainted head, still flags, and a non-template/concat argument is never
+ * suppressed.
+ */
+function headTaintSuppressed(arg: SyntaxNode, ft: FunctionTaint, lang: SastLanguage, depth = 0): boolean {
+  // `new URL(ref, base)` — ask the same question of `ref`, which is what decides
+  // whether the base's origin survives. A reference that opens its own authority
+  // ('//host', 'https://host') fails the checks below exactly as it should.
+  const reference = depth < 4 ? urlBaseRelativeReference(arg, lang) : null
+  if (reference) return headTaintSuppressed(reference, ft, lang, depth + 1)
   const { constantPrefix, headExpr, parts } = urlHeadOf(arg, lang)
   if (!parts) return false // opaque expression — the whole argument is the URL
   if (constantPrefix !== null && (AUTHORITY_PINNED_PREFIX.test(constantPrefix) || SINGLE_SLASH_PATH.test(constantPrefix))) {

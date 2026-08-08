@@ -61,22 +61,60 @@ export function asFunction(node: SyntaxNode, lang: SastLanguage): NFunc | null {
   return { name, params: paramNames(node), body, node, line: node.startPosition.row + 1 }
 }
 
-function paramNames(node: SyntaxNode): string[] {
-  // The parameter container differs per grammar; find it, then pull leaf names.
+/** The parameter container for a function node; grammars name it differently. */
+function paramContainer(node: SyntaxNode): SyntaxNode | null {
   const containerTypes = new Set([
     'formal_parameters', 'parameters', 'parameter_list', 'method_parameters',
     'formal_parameter_list', 'block_parameters', 'closure_parameters',
   ])
-  let container: SyntaxNode | null = field(node, 'parameters')
-  if (!container) {
-    for (let i = 0; i < node.childCount; i++) {
-      const c = node.child(i)
-      if (c && containerTypes.has(c.type)) {
-        container = c
-        break
-      }
-    }
+  const container = field(node, 'parameters')
+  if (container) return container
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i)
+    if (c && containerTypes.has(c.type)) return c
   }
+  return null
+}
+
+/**
+ * EVERY name a function's signature binds, including the leaves of a
+ * destructuring pattern (`({ ctx, input })`, `({ params }: Props)`).
+ *
+ * Distinct from {@link paramNames}, which returns POSITIONAL parameters and
+ * feeds the interprocedural summary — a destructured leaf has no argument
+ * position, so it cannot appear there. This set answers a different question:
+ * "did this function's signature introduce this identifier?" Destructuring is
+ * how request-handling code normally binds its request, so a gate that only
+ * saw positional names would miss the majority of real handlers.
+ *
+ * Over-approximates slightly: an identifier inside a default-value expression
+ * (`function f(a = fallback)`) is collected too. That only ever makes the gate
+ * more permissive, which is the safe direction for a precision narrowing.
+ */
+export function paramBoundNames(node: SyntaxNode): Set<string> {
+  const names = new Set<string>()
+  const add = (n: SyntaxNode | null): void => {
+    if (!n) return
+    if (n.type === 'identifier' || n.type === 'shorthand_property_identifier_pattern') {
+      names.add(n.text)
+      return
+    }
+    if (n.type === 'variable_name') {
+      names.add(n.text.replace(/^\$/, ''))
+      return
+    }
+    // Type annotations contribute `type_identifier`, not `identifier`, so a
+    // blanket descent does not pull type names in.
+    for (const c of n.namedChildren) add(c)
+  }
+  const container = paramContainer(node)
+  if (container) for (const c of container.namedChildren) add(c)
+  else add(field(node, 'parameter'))
+  return names
+}
+
+function paramNames(node: SyntaxNode): string[] {
+  const container = paramContainer(node)
   // JS arrow with a single bare identifier param: `x => ...`
   if (!container) {
     const p = field(node, 'parameter')

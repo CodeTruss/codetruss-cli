@@ -1,6 +1,6 @@
 import { readFile } from 'fs/promises'
 import { join } from 'path'
-import { incompleteAnalyzerOutput, type Analyzer, type AnalyzerFinding } from './types'
+import { incompleteAnalyzerOutput, measuredCoverage, type Analyzer, type AnalyzerFinding } from './types'
 import type { RepoIndex } from './types'
 
 /**
@@ -53,11 +53,18 @@ export const vulnerabilityAnalyzer: Analyzer = {
     const collected = await collectPackages(index)
     const { queries } = collected
     if (queries.length === 0) {
-      return collected.truncated
+      const bounds = truncationBounds(collected, 0)
+      return bounds
         ? incompleteAnalyzerOutput([], {
             truncated: true,
-            detail: 'Dependency manifests exceeded the vulnerability analyzer manifest bound.',
-            metrics: { packages: 0, manifestLimit: MAX_MANIFESTS },
+            coverageRatio: bounds.coverageRatio,
+            detail: bounds.detail,
+            metrics: {
+              packages: 0,
+              manifestsFound: collected.manifestsFound,
+              manifestsRead: collected.manifestsRead,
+              manifestLimit: MAX_MANIFESTS,
+            },
           })
         : []
     }
@@ -127,19 +134,63 @@ export const vulnerabilityAnalyzer: Analyzer = {
         metadata: { ecosystem: q.ecosystem, vulnIds: vulns.map((v) => v.id).slice(0, 10), fixedVersion: fixed },
       })
     }
-    const truncated = collected.truncated || queries.length > limited.length || results.length < limited.length
-    return truncated
+    const packagesChecked = Math.min(results.length, limited.length)
+    const bounds = truncationBounds(collected, packagesChecked)
+    return bounds
       ? incompleteAnalyzerOutput(findings, {
           truncated: true,
-          detail: `Vulnerability analysis covered ${Math.min(results.length, limited.length)} of ${queries.length} package versions.`,
+          coverageRatio: bounds.coverageRatio,
+          detail: bounds.detail,
           metrics: {
             packages: queries.length,
-            packagesChecked: Math.min(results.length, limited.length),
+            packagesChecked,
             packageLimit: BATCH_SIZE * MAX_BATCHES,
+            manifestsFound: collected.manifestsFound,
+            manifestsRead: collected.manifestsRead,
+            manifestLimit: MAX_MANIFESTS,
           },
         })
       : findings
   },
+}
+
+/**
+ * Which bound actually cost this pass something, and how much.
+ *
+ * Two independent bounds can bite: unread dependency manifests and the OSV
+ * batch cap. Reporting only the second produced the message that started this
+ * — a scan stopped by the manifest bound announcing it "covered 181 of 181
+ * package versions", complete-sounding while voiding every score. Each bound
+ * that bit is named in its own unit, and the coverage claimed is the worst of
+ * them, because the pass is only as authoritative as its weakest bound.
+ *
+ * Returns null when nothing was lost.
+ */
+function truncationBounds(
+  collected: { queries: PackageQuery[]; manifestsFound: number; manifestsRead: number },
+  packagesChecked: number,
+): { coverageRatio: number | undefined; detail: string } | null {
+  const bounds: Array<{ ratio: number | undefined; text: string }> = []
+  if (collected.manifestsRead < collected.manifestsFound) {
+    bounds.push({
+      ratio: measuredCoverage(collected.manifestsRead, collected.manifestsFound),
+      text: `read ${collected.manifestsRead} of ${collected.manifestsFound} dependency manifests`,
+    })
+  }
+  if (packagesChecked < collected.queries.length) {
+    bounds.push({
+      ratio: measuredCoverage(packagesChecked, collected.queries.length),
+      text: `checked ${packagesChecked} of ${collected.queries.length} declared package versions`,
+    })
+  }
+  if (bounds.length === 0) return null
+  const ratios = bounds.map((bound) => bound.ratio).filter((ratio): ratio is number => ratio !== undefined)
+  return {
+    // A bound whose own denominator was unusable makes the whole claim
+    // unusable — better no ratio than one that ignores a bound.
+    coverageRatio: ratios.length === bounds.length ? Math.min(...ratios) : undefined,
+    detail: `Vulnerability analysis ${bounds.map((bound) => bound.text).join(' and ')}; anything declared outside that was not checked against OSV.dev.`,
+  }
 }
 
 /** One INFO notice instead of silence when OSV.dev is unreachable. */
@@ -161,8 +212,18 @@ function unavailableFinding(queries: PackageQuery[], err: unknown): AnalyzerFind
   }
 }
 
-/** Direct dependencies with exact versions: npm (lockfile → range fallback) + PyPI pins. */
-async function collectPackages(index: RepoIndex): Promise<{ queries: PackageQuery[]; truncated: boolean }> {
+/**
+ * Direct dependencies with exact versions: npm (lockfile → range fallback) +
+ * PyPI pins. Reports the manifest counts as well as the packages, because the
+ * manifest bound and the OSV batch bound are different losses and a reader told
+ * only about packages cannot tell which one bit.
+ */
+async function collectPackages(index: RepoIndex): Promise<{
+  queries: PackageQuery[]
+  manifestsFound: number
+  manifestsRead: number
+  truncated: boolean
+}> {
   // vendored payloads' manifests are not the product's dependencies
   const eligible = index.files.filter((f) => f.kind !== 'vendored')
   const out: PackageQuery[] = []
@@ -214,6 +275,8 @@ async function collectPackages(index: RepoIndex): Promise<{ queries: PackageQuer
 
   return {
     queries: out,
+    manifestsFound: allPkgPaths.length + allReqPaths.length,
+    manifestsRead: pkgPaths.length + reqPaths.length,
     truncated: allPkgPaths.length > MAX_MANIFESTS || allReqPaths.length > MAX_MANIFESTS,
   }
 }

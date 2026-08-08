@@ -1,4 +1,4 @@
-import { incompleteAnalyzerOutput, type Analyzer, type AnalyzerFinding } from './types'
+import { incompleteAnalyzerOutput, measuredCoverage, type Analyzer, type AnalyzerFinding } from './types'
 
 const MARKER = /(?:\/\/|#|\/\*|<!--)\s*(TODO|FIXME|HACK|XXX)\b[:\s]?(.{0,120})/
 
@@ -8,33 +8,45 @@ export const todosAnalyzer: Analyzer = {
   name: 'TODO Tracker',
   description: 'Aggregates TODO, FIXME, and HACK comments into visible technical debt.',
   async run(index) {
+    /** Retained markers — the sample the per-marker findings are drawn from. */
     const hits: Array<{ path: string; line: number; kind: string; text: string }> = []
 
     const hitLimit = 500
+    /**
+     * Every marker in the tree, counted past the retention bound. The headline
+     * finding is a count, so stopping the counter at 500 made it report the
+     * bound instead of the codebase — and left the pass unable to say how much
+     * of its input it had actually seen.
+     */
+    let markers = 0
+    let fixmeMarkers = 0
     for (const file of index.files) {
       if (!file.content || file.kind === 'doc' || file.kind === 'asset') continue
       const lines = file.content.split('\n')
-      for (let i = 0; i < lines.length && hits.length < hitLimit; i++) {
+      for (let i = 0; i < lines.length; i++) {
         const m = lines[i].match(MARKER)
-        if (m) hits.push({ path: file.path, line: i + 1, kind: m[1], text: m[2].trim() })
+        if (!m) continue
+        markers++
+        if (m[1] === 'FIXME' || m[1] === 'XXX' || m[1] === 'HACK') fixmeMarkers++
+        if (hits.length < hitLimit) hits.push({ path: file.path, line: i + 1, kind: m[1], text: m[2].trim() })
       }
     }
 
-    if (hits.length === 0) return []
+    if (markers === 0) return []
 
     const fixmes = hits.filter((h) => h.kind === 'FIXME' || h.kind === 'XXX' || h.kind === 'HACK')
     const findings: AnalyzerFinding[] = []
 
-    if (hits.length >= 10) {
+    if (markers >= 10) {
       findings.push({
         category: 'TECH_DEBT',
-        severity: hits.length >= 50 ? 'MEDIUM' : 'LOW',
-        title: `${hits.length} TODO/FIXME markers across the codebase`,
-        description: `The codebase carries ${hits.length} deferred-work markers (${fixmes.length} FIXME/HACK). Unowned TODOs are debt with no repayment plan.`,
+        severity: markers >= 50 ? 'MEDIUM' : 'LOW',
+        title: `${markers} TODO/FIXME markers across the codebase`,
+        description: `The codebase carries ${markers} deferred-work markers (${fixmeMarkers} FIXME/HACK). Unowned TODOs are debt with no repayment plan.`,
         suggestion: 'Convert real TODOs into tracked issues and delete stale ones.',
-        impactScore: Math.min(60, 20 + hits.length),
+        impactScore: Math.min(60, 20 + markers),
         effort: 'medium',
-        metadata: { total: hits.length, sample: hits.slice(0, 20) },
+        metadata: { total: markers, sample: hits.slice(0, 20) },
       })
     }
 
@@ -52,11 +64,14 @@ export const todosAnalyzer: Analyzer = {
       })
     }
 
-    return hits.length >= hitLimit
+    // The headline count is exact either way; what the bound costs is the
+    // per-marker sample, which is drawn only from the retained markers.
+    return markers > hitLimit
       ? incompleteAnalyzerOutput(findings, {
           truncated: true,
-          detail: `TODO analysis stopped after ${hitLimit} markers.`,
-          metrics: { markers: hits.length, hitLimit },
+          coverageRatio: measuredCoverage(hits.length, markers),
+          detail: `TODO analysis retained ${hits.length} of ${markers} markers for per-marker reporting.`,
+          metrics: { markers, retained: hits.length, hitLimit },
         })
       : findings
   },
