@@ -30,16 +30,38 @@ describe('verdict rules', () => {
     expect(computeVerdict({ agentExitCode: 0, verifications: [{ command: 'test', exitCode: 1, durationMs: 1, output: '', truncated: false }], files: [allowed], startDirty: false, findings: [] }).verdict).toBe('FAILED')
   })
 
-  it('fails closed when required analysis evidence is incomplete', () => {
-    expect(computeVerdict({ agentExitCode: 0, verifications: [], files: [allowed], startDirty: false, findings: [], evidenceIssues: ['required analyzer secrets did not complete'] }).verdict).toBe('FAILED')
+  it('withholds PASS, without failing, when a required pass could not finish', () => {
+    const outcome = computeVerdict({
+      agentExitCode: 0,
+      verifications: [],
+      files: [allowed],
+      startDirty: false,
+      findings: [],
+      evidenceIssues: [{ kind: 'partial', message: 'required analyzer secrets did not complete' }],
+    })
+    expect(outcome.verdict).toBe('REVIEW_REQUIRED')
     const passes = [
       { id: 'secrets', result: { findings: [], complete: false, detail: 'fixture failure' } },
       { id: 'vulnerabilities', result: { findings: [], complete: false, detail: 'offline policy' } },
     ] satisfies AnalyzerPass[]
     expect(analysisEvidenceIssues(passes, { discoveredFiles: 1, maxFiles: 10, truncated: false, textCandidates: 1, contentLoaded: 1, oversizedTextFiles: 0, unreadableTextFiles: 0, binaryTextFiles: 0 }))
-      .toEqual(['required analyzer secrets did not complete: fixture failure'])
+      .toEqual([{ kind: 'partial', message: 'required analyzer secrets did not complete: fixture failure' }])
+  })
+
+  it('still fails closed when there is no evidence at all', () => {
     expect(analysisEvidenceIssues([], { discoveredFiles: 0, maxFiles: 10, truncated: false, textCandidates: 0, contentLoaded: 0, oversizedTextFiles: 0, unreadableTextFiles: 0, binaryTextFiles: 0 }))
-      .toEqual(['no required deterministic analyzer passes ran'])
+      .toEqual([{ kind: 'missing', message: 'no required deterministic analyzer passes ran' }])
+    expect(analysisEvidenceIssues([{ id: 'secrets', result: { findings: [], complete: true } }], undefined))
+      .toEqual([{ kind: 'missing', message: 'repository index did not report coverage' }])
+    const outcome = computeVerdict({
+      agentExitCode: 0,
+      verifications: [],
+      files: [allowed],
+      startDirty: false,
+      findings: [],
+      evidenceIssues: [{ kind: 'missing', message: 'no required deterministic analyzer passes ran' }],
+    })
+    expect(outcome.verdict).toBe('FAILED')
   })
 
   it('requires review when an incomplete baseline is fully repaired in the final tree', () => {
@@ -49,11 +71,11 @@ describe('verdict rules', () => {
       files: [allowed],
       startDirty: false,
       findings: [],
-      baselineEvidenceIssues: ['1 apparent text file contained binary data'],
+      baselineEvidenceIssues: [{ kind: 'partial', message: '1 analyzable file could not be read' }],
     })
     expect(result).toEqual({
       verdict: 'REVIEW_REQUIRED',
-      reasons: ['baseline evidence limitation resolved in the final tree: 1 apparent text file contained binary data'],
+      reasons: ['baseline evidence limitation resolved in the final tree: 1 analyzable file could not be read'],
     })
   })
 

@@ -129,8 +129,12 @@ export async function scanFiles(
   const degraded = new Set<SastLanguage>()
   let timeCappedFiles = 0
   let timeSkippedFiles = 0
+  let unparsedFiles = 0
+  let erroredFiles = 0
   const timeCappedPaths: string[] = []
   const timeSkippedPaths: string[] = []
+  const unparsedPaths: string[] = []
+  const erroredPaths: string[] = []
 
   const fileBudgetMs = options.fileTimeBudgetMs ?? FILE_TIME_BUDGET_MS
   const passDeadline = Date.now() + (options.passTimeBudgetMs ?? PASS_TIME_BUDGET_MS)
@@ -183,6 +187,8 @@ export async function scanFiles(
       )
       if (fileFindings === null) {
         filesSkipped++
+        unparsedFiles++
+        if (unparsedPaths.length < MAX_DISCLOSED_PATHS) unparsedPaths.push(file.filePath)
         continue
       }
       filesScanned++
@@ -202,6 +208,8 @@ export async function scanFiles(
     } catch {
       // never let one file crash the scan
       filesSkipped++
+      erroredFiles++
+      if (erroredPaths.length < MAX_DISCLOSED_PATHS) erroredPaths.push(file.filePath)
     }
   }
 
@@ -220,6 +228,8 @@ export async function scanFiles(
       resourceLimitReached: memoryLimitReached,
       ...(timeCappedFiles ? { timeCappedFiles, timeCappedPaths } : {}),
       ...(timeSkippedFiles ? { timeSkippedFiles, timeSkippedPaths } : {}),
+      ...(unparsedFiles ? { unparsedFiles, unparsedPaths } : {}),
+      ...(erroredFiles ? { erroredFiles, erroredPaths } : {}),
       ...(passBudgetExceeded ? { budgetExceeded: true } : {}),
     },
   }
@@ -244,14 +254,20 @@ export function mergeSastResults(results: SastResult[], inputFiles: number): Sas
   let truncatedFiles = 0
   let timeCappedFiles = 0
   let timeSkippedFiles = 0
+  let unparsedFiles = 0
+  let erroredFiles = 0
   const timeCappedPaths: string[] = []
   const timeSkippedPaths: string[] = []
+  const unparsedPaths: string[] = []
+  const erroredPaths: string[] = []
   for (const result of results) {
     filesScanned += result.diagnostics.filesScanned
     filesSkipped += result.diagnostics.filesSkipped
     truncatedFiles += result.diagnostics.truncatedFiles
     timeCappedFiles += result.diagnostics.timeCappedFiles ?? 0
     timeSkippedFiles += result.diagnostics.timeSkippedFiles ?? 0
+    unparsedFiles += result.diagnostics.unparsedFiles ?? 0
+    erroredFiles += result.diagnostics.erroredFiles ?? 0
     for (const language of result.diagnostics.degradedLanguages) degradedLanguages.add(language)
     for (const path of result.diagnostics.timeCappedPaths ?? []) {
       if (timeCappedPaths.length < MAX_DISCLOSED_PATHS) timeCappedPaths.push(path)
@@ -259,9 +275,17 @@ export function mergeSastResults(results: SastResult[], inputFiles: number): Sas
     for (const path of result.diagnostics.timeSkippedPaths ?? []) {
       if (timeSkippedPaths.length < MAX_DISCLOSED_PATHS) timeSkippedPaths.push(path)
     }
+    for (const path of result.diagnostics.unparsedPaths ?? []) {
+      if (unparsedPaths.length < MAX_DISCLOSED_PATHS) unparsedPaths.push(path)
+    }
+    for (const path of result.diagnostics.erroredPaths ?? []) {
+      if (erroredPaths.length < MAX_DISCLOSED_PATHS) erroredPaths.push(path)
+    }
   }
   timeCappedPaths.sort()
   timeSkippedPaths.sort()
+  unparsedPaths.sort()
+  erroredPaths.sort()
 
   return {
     findings,
@@ -276,6 +300,8 @@ export function mergeSastResults(results: SastResult[], inputFiles: number): Sas
       budgetExceeded: results.some((result) => result.diagnostics.budgetExceeded),
       ...(timeCappedFiles ? { timeCappedFiles, timeCappedPaths } : {}),
       ...(timeSkippedFiles ? { timeSkippedFiles, timeSkippedPaths } : {}),
+      ...(unparsedFiles ? { unparsedFiles, unparsedPaths } : {}),
+      ...(erroredFiles ? { erroredFiles, erroredPaths } : {}),
       failureReason: results.find((result) => result.diagnostics.failureReason)?.diagnostics.failureReason,
     },
   }
@@ -316,6 +342,41 @@ export function timeCeilingDisclosure(diagnostics: SastDiagnostics): string | un
     parts.push(
       `the whole-pass time ceiling was reached and ${skipped} file(s) were not analyzed at all — ` +
         `${namePaths(diagnostics.timeSkippedPaths ?? [], skipped)}`,
+    )
+  }
+  return parts.length > 0 ? parts.join('; ') : undefined
+}
+
+/**
+ * The sentence a receipt prints when the parser could not read a file — naming
+ * it, and naming the limitation as OURS.
+ *
+ * A file we cannot parse is a gap in our grammar, not a defect in the reader's
+ * code, and the wording has to survive being read by someone whose perfectly
+ * valid source we just declined to analyze. Counting without naming is the
+ * failure mode this replaces: "1 file(s) could not be parsed" tells a reader
+ * that something is wrong and gives them no way to find it, act on it, or
+ * disagree with it.
+ *
+ * Returns undefined when every file parsed, so callers can spread it.
+ */
+export function parseFailureDisclosure(diagnostics: SastDiagnostics): string | undefined {
+  const parts: string[] = []
+  const unparsed = diagnostics.unparsedFiles ?? 0
+  const errored = diagnostics.erroredFiles ?? 0
+  if (unparsed > 0) {
+    const languages = diagnostics.degradedLanguages
+    parts.push(
+      `the local parser could not read ${unparsed} file(s), so no security rule ran over them — ` +
+        `${namePaths(diagnostics.unparsedPaths ?? [], unparsed)}` +
+        `${languages.length ? ` (${languages.join(', ')})` : ''}; ` +
+        'this is a limit of the bundled grammar, not a defect in those files',
+    )
+  }
+  if (errored > 0) {
+    parts.push(
+      `security analysis threw partway through ${errored} file(s) and reported nothing for them — ` +
+        `${namePaths(diagnostics.erroredPaths ?? [], errored)}`,
     )
   }
   return parts.length > 0 ? parts.join('; ') : undefined

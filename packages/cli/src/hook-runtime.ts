@@ -373,6 +373,7 @@ function frozenConfig(config: CliConfig): CliConfig {
     version: 1,
     allow: [...config.allow],
     deny: [...config.deny],
+    exclude: [...config.exclude],
     verify: [...config.verify],
     receipts: { dir: config.receipts.dir },
     llm: {
@@ -402,6 +403,10 @@ function validateHookTurnContext(value: unknown): HookTurnContext {
     || (context.surface !== undefined && context.surface !== 'claude' && context.surface !== 'codex')
     || !config || config.version !== 1
     || !isStringArray(config.allow) || !isStringArray(config.deny) || !isStringArray(config.verify)
+    // Optional: a turn captured by a CLI released before `exclude` existed is
+    // still authentic evidence, and rejecting it would strand pending turns
+    // across an upgrade. Absent means excluded nothing, normalized below.
+    || (config.exclude !== undefined && !isStringArray(config.exclude))
     || !config.receipts || typeof config.receipts.dir !== 'string'
     || !config.llm || !Number.isFinite(config.llm.maxDiffBytes) || config.llm.maxDiffBytes <= 0
     // `codex` is accepted only while authenticating pending legacy hook
@@ -414,6 +419,7 @@ function validateHookTurnContext(value: unknown): HookTurnContext {
     || !isStringArray(context.baselineDirtyFiles)) {
     throw new Error('hook turn context is invalid')
   }
+  config.exclude ??= []
   return context as HookTurnContext
 }
 

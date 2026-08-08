@@ -6,6 +6,7 @@ import {
   type AnalyzerFinding,
 } from './types'
 import { classifyLines, commentSyntaxFor, contentWords, dataBlockIds, type ClassifiedLine } from './comments'
+import { stripStringLiterals } from './support'
 
 /**
  * `looksGenerated` reads five lines, and codegen that leads with an
@@ -90,11 +91,10 @@ const EXPLANATORY =
  * shares are the strings being matched. Every measured true positive shares at
  * least one word with an identifier, so requiring that costs no recall.
  */
-const STRING_LITERAL = /(["'`])(?:\\.|(?!\1).)*\1/g
 const REGEX_LITERAL = /\/(?:\\.|\[[^\]]*\]|[^/\n\\])+\/[gimsuy]*/g
 
 function withoutLiterals(code: string): string {
-  return code.replace(STRING_LITERAL, ' ').replace(REGEX_LITERAL, ' ')
+  return stripStringLiterals(code, ' ').replace(REGEX_LITERAL, ' ')
 }
 
 /**

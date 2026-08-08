@@ -1,6 +1,7 @@
 import type { AnalyzerFinding, AnalyzerPass, RepoIndex } from '@codetruss/analyzer-engine'
 import {
   mergeSastResults,
+  parseFailureDisclosure,
   scanFiles,
   timeCeilingDisclosure,
   type ScanInput,
@@ -163,6 +164,53 @@ const EMPTY_SCAN: SastResult = {
   },
 }
 
+/**
+ * Skipped files no other disclosure accounts for — a memory ceiling, or an
+ * input with no language.
+ *
+ * Subtraction, not `filesSkipped` outright. The old sentence quoted the whole
+ * count under the words "could not be parsed", which was wrong twice: it swept
+ * in files the clock skipped, which are disclosed separately and were therefore
+ * reported to the reader twice, and it named no path at all.
+ */
+function unattributedSkipDisclosure(diagnostics: SastDiagnostics): string | undefined {
+  const unattributed = diagnostics.filesSkipped
+    - (diagnostics.unparsedFiles ?? 0)
+    - (diagnostics.erroredFiles ?? 0)
+    - (diagnostics.timeSkippedFiles ?? 0)
+  return unattributed > 0
+    ? `${unattributed} file(s) were skipped before analysis and were not analyzed`
+    : undefined
+}
+
+/**
+ * Which files this pass never saw, as signed receipt data rather than prose.
+ *
+ * The detail string carries the same facts in English; these carry them where
+ * `verify-receipt` and any later reader can recover them without parsing a
+ * sentence. Each group is omitted when empty, so a repository that parsed
+ * cleanly signs exactly the bytes it did before.
+ */
+function unseenFileMetrics(diagnostics: SastDiagnostics): Record<string, string | number> {
+  return {
+    ...(diagnostics.unparsedFiles
+      ? {
+          unparsedFiles: diagnostics.unparsedFiles,
+          unparsedPaths: (diagnostics.unparsedPaths ?? []).join(', '),
+        }
+      : {}),
+    ...(diagnostics.erroredFiles
+      ? {
+          erroredFiles: diagnostics.erroredFiles,
+          erroredPaths: (diagnostics.erroredPaths ?? []).join(', '),
+        }
+      : {}),
+    ...(diagnostics.degradedLanguages.length
+      ? { degradedLanguages: diagnostics.degradedLanguages.join(', ') }
+      : {}),
+  }
+}
+
 export async function runLocalSast(index: RepoIndex, env: NodeJS.ProcessEnv = process.env): Promise<LocalSastResult> {
   const jsInputs = localSastInputs(index)
   const pythonInputs = localPythonInputs(index)
@@ -228,16 +276,12 @@ export async function runLocalSast(index: RepoIndex, env: NodeJS.ProcessEnv = pr
   const details = [
     jsError ? `the JavaScript pass failed: ${jsError}` : undefined,
     pythonError,
-    // Gated on the count it quotes: truncation now has more than one cause, and
-    // "0 file(s) could not be parsed" on a run where the clock was the limit
-    // would be a false sentence on a signed document.
-    diagnostics.filesSkipped > 0
-      ? `${diagnostics.filesSkipped} file(s) could not be parsed locally and were not analyzed`
-      : undefined,
-    // Named, never merely counted: a file the clock cut short is missing
+    // Named, never merely counted: a file we could not parse is missing
     // evidence, and the receipt has to say which file rather than let a shorter
     // finding list read as a cleaner repository.
+    parseFailureDisclosure(diagnostics),
     timeCeilingDisclosure(diagnostics),
+    unattributedSkipDisclosure(diagnostics),
   ].filter((entry): entry is string => Boolean(entry))
 
   const error = jsError ?? pythonError
@@ -258,6 +302,7 @@ export async function runLocalSast(index: RepoIndex, env: NodeJS.ProcessEnv = pr
           inputFiles: diagnostics.inputFiles,
           filesScanned: diagnostics.filesScanned,
           filesSkipped: diagnostics.filesSkipped,
+          ...unseenFileMetrics(diagnostics),
           rules: CLI_SAST_RULE_IDS.size,
           // The receipt renders its Python disclosure from these, so what a
           // reader is told about coverage is derived from what actually ran on

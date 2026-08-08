@@ -33,6 +33,7 @@ export const DEFAULT_CONFIG: CliConfig = {
   version: 1,
   allow: [],
   deny: [],
+  exclude: [],
   verify: [],
   receipts: { dir: APPROVED_RECEIPT_DIR },
   llm: { maxDiffBytes: 200_000 },
@@ -103,6 +104,7 @@ export async function loadConfig(root: string): Promise<CliConfig> {
     version: 1,
     allow: list('allow'),
     deny: list('deny'),
+    exclude: list('exclude'),
     verify: list('verify'),
     receipts: { dir: typeof receipts.dir === 'string' ? receipts.dir : DEFAULT_CONFIG.receipts.dir },
     llm: {
@@ -189,13 +191,22 @@ export async function initialize(root: string, force = false, options: Initializ
     version: DEFAULT_CONFIG.version,
     allow,
     deny,
+    // Written empty so the key is discoverable in the file a user already has,
+    // rather than only in documentation they have not read yet.
+    exclude: [],
     verify: detected,
     receipts: DEFAULT_CONFIG.receipts,
     llm: DEFAULT_CONFIG.llm,
     signing: { publicKey: key.publicKey },
   }
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `# CodeTruss local agent guardrails. Deny wins; unmatched paths are unexpected.\n${stringify(value)}`, 'utf8')
+  await writeFile(
+    path,
+    '# CodeTruss local agent guardrails. Deny wins; unmatched paths are unexpected.\n'
+    + '# exclude: globs to keep OUT of analysis (still inventoried, still disclosed on the receipt).\n'
+    + stringify(value),
+    'utf8',
+  )
   await mkdir(join(root, DEFAULT_CONFIG.receipts.dir), { recursive: true })
   return path
 }

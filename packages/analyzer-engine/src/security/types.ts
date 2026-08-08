@@ -70,6 +70,25 @@ export interface SastDiagnostics {
   filesSkipped: number
   /** Languages that could not be parsed (grammar unavailable) — SAST degraded. */
   degradedLanguages: SastLanguage[]
+  /**
+   * Files the parser could not turn into a tree, so no rule ran over them.
+   * Also counted in {@link filesSkipped}.
+   *
+   * A count alone is not actionable — the reader cannot exclude, fix, or even
+   * look at a file we decline to name — so the paths travel with it.
+   */
+  unparsedFiles?: number
+  /** Paths of those files. Bounded; {@link unparsedFiles} stays authoritative. */
+  unparsedPaths?: string[]
+  /**
+   * Files whose scan threw partway through. Also counted in
+   * {@link filesSkipped}. Kept apart from {@link unparsedFiles} because the two
+   * ask different things of the reader: an unparsed file is a grammar gap they
+   * can route around, a thrown one is a defect worth reporting.
+   */
+  erroredFiles?: number
+  /** Paths of those files, bounded the same way. */
+  erroredPaths?: string[]
   /** Files whose scan hit the per-file budget and returned partial results. */
   truncatedFiles: number
   /**

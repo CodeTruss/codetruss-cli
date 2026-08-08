@@ -18,6 +18,22 @@ export function classifyPath(path: string, oldPath: string | undefined, allow: s
   return rank[previous] > rank[current] ? previous : current
 }
 
+/**
+ * A predicate for `.codetruss.yml` `exclude` globs, normalizing paths exactly
+ * the way classifyPath does so a glob that means one thing for scope cannot
+ * quietly mean another for analysis.
+ *
+ * Returns a predicate that is always false for an empty list, so the indexer
+ * takes no per-file cost in the overwhelmingly common case.
+ */
+export function excludeMatcher(exclude: string[]): ((path: string) => boolean) | undefined {
+  if (!exclude.length) return undefined
+  return (path: string) => {
+    const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '')
+    return exclude.some((pattern) => minimatch(normalized, pattern, { dot: true }))
+  }
+}
+
 const SENSITIVE: Array<[string, string]> = [
   ['.codetruss.yml', 'policy'], ['**/.gitignore', 'vcs'], ['**/.gitattributes', 'vcs'],
   ['.github/workflows/**', 'ci'], ['.gitlab-ci.yml', 'ci'], ['.circleci/**', 'ci'], ['.buildkite/**', 'ci'], ['Jenkinsfile', 'ci'], ['azure-pipelines.yml', 'ci'],

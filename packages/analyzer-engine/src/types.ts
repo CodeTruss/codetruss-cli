@@ -48,6 +48,10 @@ export interface IndexCoverage {
   oversizedTextFiles: number
   unreadableTextFiles: number
   binaryTextFiles: number
+  /** Files a caller-supplied exclusion kept out of the index entirely. */
+  excludedFiles?: number
+  /** Paths of those files. Bounded; {@link excludedFiles} stays authoritative. */
+  excludedPaths?: string[]
 }
 
 export interface RepoIndex {

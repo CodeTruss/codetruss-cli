@@ -148,6 +148,9 @@ describe('the local pass is a pass, not a registry analyzer', () => {
     const pass = analysis.passes.find((entry) => entry.id === LOCAL_SAST_PASS_ID)
     expect(pass?.result.complete).toBe(false)
     expect(pass?.result.truncated).toBe(true)
-    expect(pass?.result.detail).toMatch(/could not be parsed locally/)
+    // Names the file. A count on its own told the reader something in their
+    // repository was unreadable and gave them no way to find out what.
+    expect(pass?.result.detail).toMatch(/could not read 1 file\(s\)/)
+    expect(pass?.result.detail).toContain('src/broken.ts')
   })
 })

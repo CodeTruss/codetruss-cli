@@ -88,6 +88,18 @@ export interface CliConfig {
   version: 1
   allow: string[]
   deny: string[]
+  /**
+   * Globs whose files are kept out of the analysis index entirely.
+   *
+   * The escape hatch for a file this tool cannot read — a grammar we do not
+   * have, a generated blob, a vendored payload our heuristics miss — so a
+   * coverage gap does not have to sit on every receipt forever. It is an
+   * ANALYSIS exclusion only: an excluded path is still inventoried as a changed
+   * file, still classified against allow/deny, still counted as a sensitive
+   * surface, and is named on the receipt. Hiding a change would be a worse bug
+   * than the coverage gap it works around.
+   */
+  exclude: string[]
   verify: string[]
   receipts: { dir: string }
   llm: {
@@ -212,7 +224,7 @@ export interface Receipt {
    * only when this turn actually used one — which is what keeps receipts signed
    * before inference existed rendering, and verifying, byte for byte.
    */
-  scope: { allow: string[]; deny: string[]; inferred?: InferredScopeRoot[] }
+  scope: { allow: string[]; deny: string[]; exclude?: string[]; inferred?: InferredScopeRoot[] }
   files: ChangedFile[]
   diff: { sha256: string; bytes: number; totalBytes?: number; truncated: boolean }
   analyzers: AnalyzerReceipt
@@ -229,6 +241,7 @@ export interface ReviewOptions {
   task: string
   allow: string[]
   deny: string[]
+  exclude: string[]
   verify: string[]
   llm: boolean
   provider?: string

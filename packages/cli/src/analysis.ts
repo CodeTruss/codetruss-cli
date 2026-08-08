@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto'
 import { annotateSuppressions, runAnalyzers, type AnalyzerFinding, type AnalyzerPass, type IndexCoverage } from '@codetruss/analyzer-engine'
 import { CLI_SAST_UNCHECKED_CLASSES } from '@codetruss/analyzer-engine/security/local-profile'
+import { CONFIG_FILE } from './config.js'
 import { indexRepository } from './indexer.js'
 import { LOCAL_SAST_PASS_ID, runLocalSast, type SastCoverageGap } from './local-sast.js'
 import { LOCAL_ANALYSIS_PROFILE, type ChangedFile, type Receipt, type VerificationResult, type Verdict, type LlmReview } from './types.js'
 
-export async function analyzeRepository(root: string) {
-  const index = await indexRepository(root)
+export async function analyzeRepository(root: string, exclude: string[] = []) {
+  const index = await indexRepository(root, exclude)
   const priorOffline = process.env.CODETRUSS_OFFLINE
   process.env.CODETRUSS_OFFLINE = '1'
   try {
@@ -205,7 +206,19 @@ function coverageIsAuthoritative(coverage: IndexCoverage | undefined): boolean {
   return ratio !== undefined && ratio >= AUTHORITATIVE_COVERAGE_RATIO
 }
 
-/** Content-loading limitations, worded so the reader learns the fix, not just the symptom. */
+/**
+ * Content-loading limitations that COST coverage, worded so the reader learns
+ * the fix, not just the symptom.
+ *
+ * Binary data found inside an apparent text file is deliberately NOT here.
+ * indexCoverageRatio() already subtracts those files from the denominator on the
+ * grounds that they are not analyzable, so counting them as a limitation
+ * contradicted the same file's own arithmetic: the ratio said nothing was lost
+ * while the verdict said coverage was partial. In practice one design asset with
+ * a text-ish extension — a `logo.ai` — made every change to that repository
+ * REVIEW_REQUIRED forever, for a file no analyzer was ever going to read.
+ * It is disclosed by analysisClassificationNotes() instead.
+ */
 function coverageLimitations(coverage: IndexCoverage): string[] {
   const limitations: string[] = []
   if (coverage.oversizedTextFiles > 0) {
@@ -214,8 +227,81 @@ function coverageLimitations(coverage: IndexCoverage): string[] {
     )
   }
   if (coverage.unreadableTextFiles > 0) limitations.push(`${coverage.unreadableTextFiles} analyzable file(s) could not be read`)
-  if (coverage.binaryTextFiles > 0) limitations.push(`${coverage.binaryTextFiles} apparent text file(s) contained binary data`)
   return limitations
+}
+
+/**
+ * What the index RECLASSIFIED rather than failed to read.
+ *
+ * Still disclosed — the reader learns exactly what was treated as an asset —
+ * but on the receipt's coverage notes rather than as a verdict reason, because
+ * no analyzable input was lost.
+ */
+export function analysisClassificationNotes(coverage: IndexCoverage | undefined): string[] {
+  if (!coverage || coverage.binaryTextFiles <= 0) return []
+  return [
+    `${coverage.binaryTextFiles} apparent text file(s) contained binary data and were indexed as assets rather than analyzed; no analyzable input was lost.`,
+  ]
+}
+
+/**
+ * What the repository's own `exclude` globs kept out of analysis, named.
+ *
+ * An exclusion that hid itself would be strictly worse than the coverage gap it
+ * works around: a receipt would read as full coverage over a tree nobody looked
+ * at. So the globs AND the paths they matched are stated on every receipt that
+ * used them, whether or not anything else about the run is noteworthy.
+ */
+export function analysisExclusionNotes(
+  exclude: string[],
+  coverage: IndexCoverage | undefined,
+): string[] {
+  if (!exclude.length) return []
+  const matched = coverage?.excludedFiles ?? 0
+  const named = coverage?.excludedPaths ?? []
+  const rest = matched - named.length
+  const paths = named.length
+    ? `: ${named.join(', ')}${rest > 0 ? `, and ${rest} more` : ''}`
+    : ''
+  return [
+    `${CONFIG_FILE} exclude (${exclude.join(', ')}) kept ${matched} file(s) out of every analyzer pass${paths}. `
+    + 'Excluded files are still inventoried as changed files and still classified against scope; they are not analyzed, and nothing on this receipt speaks to their contents.',
+  ]
+}
+
+/**
+ * Why a receipt's evidence is not whole — and, the part that decides a verdict,
+ * whether that means the CHANGE is unsafe or only that WE could not look.
+ *
+ * `missing` is the absence of evidence. No analyzer pass ran at all, or the
+ * index cannot state what it covered. A run like that supports no conclusion in
+ * either direction, so the receipt refuses instead of reporting a verdict it has
+ * no basis for. That is a real failure and still exits non-zero.
+ *
+ * `partial` is a HOLE in evidence that otherwise exists: a file our parser could
+ * not read, a file too large to load, a clock that fired mid-pass. Every one of
+ * those is a limit of THIS TOOL, and none of them is a statement about the
+ * change under review. Reporting FAILED for them inverts what the receipt is
+ * for — it accuses the author of a defect that is ours — and it is unactionable
+ * besides, because no edit to their change teaches our grammar to read the file.
+ * These withhold PASS and are named, with their paths, on the receipt.
+ *
+ * The distinction is deliberately made HERE, where the cause is still known,
+ * rather than by matching on the message text at the verdict.
+ */
+export type EvidenceIssueKind = 'missing' | 'partial'
+
+export interface EvidenceIssue {
+  kind: EvidenceIssueKind
+  message: string
+}
+
+const missing = (message: string): EvidenceIssue => ({ kind: 'missing', message })
+const partial = (message: string): EvidenceIssue => ({ kind: 'partial', message })
+
+/** Re-word an issue while preserving the classification that decides the verdict. */
+export function prefixEvidenceIssue(issue: EvidenceIssue, prefix: string): EvidenceIssue {
+  return { ...issue, message: `${prefix}${issue.message}` }
 }
 
 /**
@@ -228,19 +314,22 @@ function coverageLimitations(coverage: IndexCoverage): string[] {
 export function analysisEvidenceIssues(
   passes: AnalyzerPass[],
   coverage: IndexCoverage | undefined,
-): string[] {
-  const issues: string[] = []
+): EvidenceIssue[] {
+  const issues: EvidenceIssue[] = []
   const requiredPasses = passes.filter((pass) => pass.id !== 'vulnerabilities')
-  if (requiredPasses.length === 0) issues.push('no required deterministic analyzer passes ran')
+  // No pass ran: there is nothing to be partial ABOUT.
+  if (requiredPasses.length === 0) issues.push(missing('no required deterministic analyzer passes ran'))
   for (const pass of requiredPasses) {
     if (pass.error || !pass.result.complete || pass.result.truncated) {
-      issues.push(`required analyzer ${pass.id} did not complete${pass.result.detail ? `: ${pass.result.detail}` : ''}`)
+      issues.push(partial(`required analyzer ${pass.id} did not complete${pass.result.detail ? `: ${pass.result.detail}` : ''}`))
     }
   }
-  if (!coverage) issues.push('repository index did not report coverage')
+  // The index refusing to describe its own coverage is not a small hole; it is
+  // the one fact every other coverage claim on the receipt is measured against.
+  if (!coverage) issues.push(missing('repository index did not report coverage'))
   else {
-    if (coverage.truncated) issues.push(`repository index reached its ${coverage.maxFiles}-file bound`)
-    if (!coverageIsAuthoritative(coverage)) issues.push(...coverageLimitations(coverage))
+    if (coverage.truncated) issues.push(partial(`repository index reached its ${coverage.maxFiles}-file bound`))
+    if (!coverageIsAuthoritative(coverage)) issues.push(...coverageLimitations(coverage).map(partial))
   }
   return issues
 }
@@ -295,16 +384,21 @@ export function computeVerdict(input: {
   startDirty: boolean
   findings: AnalyzerFinding[]
   llm?: LlmReview
-  evidenceIssues?: string[]
-  baselineEvidenceIssues?: string[]
+  evidenceIssues?: EvidenceIssue[]
+  baselineEvidenceIssues?: EvidenceIssue[]
   advisoryEvidenceIssues?: string[]
 }): { verdict: Verdict; reasons: string[] } {
   const failed: string[] = []
   const review: string[] = []
   const notes: string[] = []
   if (input.agentExitCode !== undefined && input.agentExitCode !== 0) failed.push(`agent command exited with code ${input.agentExitCode}`)
-  for (const issue of input.evidenceIssues ?? []) failed.push(`evidence incomplete: ${issue}`)
-  for (const issue of input.baselineEvidenceIssues ?? []) review.push(`baseline evidence limitation resolved in the final tree: ${issue}`)
+  // A hole in coverage withholds PASS; it does not fail the change. See
+  // EvidenceIssueKind for why the two are not the same claim.
+  for (const issue of input.evidenceIssues ?? []) {
+    if (issue.kind === 'missing') failed.push(`evidence missing: ${issue.message}`)
+    else review.push(`not fully inspected: ${issue.message}`)
+  }
+  for (const issue of input.baselineEvidenceIssues ?? []) review.push(`baseline evidence limitation resolved in the final tree: ${issue.message}`)
   for (const issue of input.advisoryEvidenceIssues ?? []) review.push(`index coverage was partial but authoritative: ${issue}`)
   for (const verification of input.verifications.filter((item) => item.exitCode !== 0)) failed.push(`verification command failed: ${verification.command}`)
   /**

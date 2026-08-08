@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { realpath, rmdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { analyzeRepository, analysisCoverageNotes, analysisEvidenceIssues, analyzerReceipt, computeVerdict, diffFindings } from './analysis.js'
+import { analyzeRepository, analysisClassificationNotes, analysisCoverageNotes, analysisEvidenceIssues, analysisExclusionNotes, analyzerReceipt, computeVerdict, diffFindings, prefixEvidenceIssue, type EvidenceIssue } from './analysis.js'
 import { loadSyncAuthentication } from './auth-storage.js'
 import { CONFIG_FILE, initialize, loadConfig, receiptDir, trustLocalSigningKey } from './config.js'
 import {
@@ -374,6 +374,9 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
     mode, task,
     allow: many(parsed, 'allow', config.allow),
     deny: many(parsed, 'deny', config.deny),
+    // Repository-owned only. A command-line flag that could silence analysis of
+    // any path would turn the escape hatch into a way to launder a receipt.
+    exclude: config.exclude,
     verify: parsed.booleans.has('no-verify') ? [] : many(parsed, 'verify', config.verify),
     llm: hookEvidence ? false : parsed.booleans.has('llm'),
     provider: hookEvidence ? config.llm.provider : requestedProvider,
@@ -470,8 +473,8 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
       throw new Error('CodeTruss immutable evidence snapshots did not resolve to Git trees')
     }
 
-    const baselineAnalysis = await analyzeRepository(baselineSnapshot.root)
-    const analysis = await analyzeRepository(finalSnapshot.root)
+    const baselineAnalysis = await analyzeRepository(baselineSnapshot.root, options.exclude)
+    const analysis = await analyzeRepository(finalSnapshot.root, options.exclude)
     const findingDelta = diffFindings(
       baselineAnalysis.findings,
       analysis.findings,
@@ -484,9 +487,13 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
     const relevantFindings = [...findingDelta.introduced, ...findingDelta.worsened]
     const baselineEvidenceIssues = analysisEvidenceIssues(baselineAnalysis.passes, baselineAnalysis.index.coverage)
     const finalEvidenceIssues = analysisEvidenceIssues(analysis.passes, analysis.index.coverage)
-    const evidenceIssues = [
-      ...finalEvidenceIssues.map((issue) => `final ${issue}`),
-      ...(diff.truncated ? [`diff capture retained ${diff.capturedBytes} of ${diff.totalBytes} bytes`] : []),
+    const evidenceIssues: EvidenceIssue[] = [
+      ...finalEvidenceIssues.map((issue) => prefixEvidenceIssue(issue, 'final ')),
+      // A truncated diff is coverage we did not read, not a defect in the
+      // change: the bytes we did read are still exactly what the author wrote.
+      ...(diff.truncated
+        ? [{ kind: 'partial' as const, message: `diff capture retained ${diff.capturedBytes} of ${diff.totalBytes} bytes` }]
+        : []),
     ]
     // Coverage gaps small enough to leave the index authoritative: reported, not fatal.
     const advisoryEvidenceIssues = analysisCoverageNotes(analysis.index.coverage).map((issue) => `final ${issue}`)
@@ -593,6 +600,7 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
       scope: {
         allow: options.allow,
         deny: options.deny,
+        ...(options.exclude.length ? { exclude: options.exclude } : {}),
         ...(inferredScope.length ? { inferred: inferredScope } : {}),
       },
       files,
@@ -624,6 +632,11 @@ async function executeReview(parsed: Parsed, root: string, liveConfig: CliConfig
             ? 'The requested optional LLM review did not produce accepted evidence; the failure is recorded in the verdict reasons.'
             : 'No source code or diff left the machine.',
         'Every verification command ran outside the live repository on a fresh materialization of the same immutable final Git tree, so source-tree mutations could not affect later checks. Trusted commands reused the repository\'s ignored installed Node dependencies when present.',
+        // What we chose not to read, and what we reclassified rather than read.
+        // Neither changes the verdict; both change what this receipt may claim,
+        // so both are stated here rather than left to be inferred from silence.
+        ...analysisExclusionNotes(options.exclude, analysis.index.coverage),
+        ...analysisClassificationNotes(analysis.index.coverage),
       ],
       verdict: outcome.verdict, reasons: outcome.reasons, evidence: {},
     }
