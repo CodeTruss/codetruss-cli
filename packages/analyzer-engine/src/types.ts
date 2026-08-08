@@ -134,8 +134,27 @@ export interface AnalyzerRunResult {
   findings: AnalyzerFinding[]
   complete: boolean
   truncated?: boolean
+  /**
+   * Fraction of its analyzable input a TRUNCATED pass measurably read. A
+   * truncated required pass is not authoritative on its own, so a benign output
+   * cap would otherwise void every score axis; a pass that can measure its own
+   * denominator says so here. Omitted when the cap left no measurable
+   * denominator — unread input is unknown input, and a guess is worse than
+   * withholding.
+   */
+  coverageRatio?: number
   detail?: string
   metrics?: Record<string, string | number | boolean | null>
+}
+
+/**
+ * `analyzed / available`, clamped to 1, or undefined when the denominator is
+ * unusable. Shared so every cap reports coverage the same way rather than each
+ * analyzer inventing its own arithmetic.
+ */
+export function measuredCoverage(analyzed: number, available: number): number | undefined {
+  if (!Number.isFinite(analyzed) || !Number.isFinite(available) || available <= 0) return undefined
+  return Math.min(1, analyzed / available)
 }
 
 const COMPLETION = Symbol('codetruss.analyzer-completion')

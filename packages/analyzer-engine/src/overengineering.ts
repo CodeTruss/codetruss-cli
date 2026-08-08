@@ -1,6 +1,7 @@
 import {
   annotatedAnalyzerOutput,
   incompleteAnalyzerOutput,
+  measuredCoverage,
   type Analyzer,
   type AnalyzerFinding,
   type RepoIndex,
@@ -313,7 +314,10 @@ export const overengineeringAnalyzer: Analyzer = {
     if (production.length > candidateLimit) {
       return incompleteAnalyzerOutput(findings, {
         truncated: true,
-        detail: `Speculative-structure analysis hit a candidate bound (${production.length} candidate files).`,
+        // The production-file list was built from the whole tree before the
+        // slice, so the files the bound cut are counted, not merely unknown.
+        coverageRatio: measuredCoverage(candidateLimit, production.length),
+        detail: `Speculative-structure analysis examined ${candidateLimit} of ${production.length} candidate files.`,
         metrics,
       }, withheld)
     }

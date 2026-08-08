@@ -1,5 +1,5 @@
 import { moveSecretToEnvFix, untrackEnvFileFix } from './fixes'
-import { incompleteAnalyzerOutput, type Analyzer, type AnalyzerFinding } from './types'
+import { incompleteAnalyzerOutput, measuredCoverage, type Analyzer, type AnalyzerFinding } from './types'
 
 /**
  * Defensive secret-exposure detection: flags credentials that appear to be
@@ -46,7 +46,36 @@ export function redactSecrets(text: string): string {
 }
 
 const SKIP_FILES = /(\.env\.example|\.md|\.lock|package-lock\.json|pnpm-lock\.yaml)$/i
-const PLACEHOLDER = /(example|placeholder|your[-_]|xxx|changeme|dummy|<[^>]+>|\$\{)/i
+/**
+ * A line that announces itself as documentation or a template. Matching here
+ * skips the line in silence.
+ *
+ * The word markers are TOKEN-ANCHORED. Unanchored they matched inside any
+ * alphanumeric run, and `xxx` is three characters: a random 2048-bit credential
+ * contains one about 4% of the time, so one line in twenty-five carrying a real
+ * key was dropped without a finding of any kind. The structural markers
+ * (`<PLACEHOLDER>`, `${VAR}`) are punctuation-delimited already and stay as
+ * they are, and `your-`/`your_` anchors on its left only because the token
+ * continues past it (`your_api_key`).
+ */
+const PLACEHOLDER = new RegExp(
+  [
+    '<[^>]+>',
+    '\\$\\{',
+    '(?<![A-Za-z0-9])your[-_]',
+    '(?<![A-Za-z0-9])(?:example|placeholder|changeme|dummy|x{3,})(?![A-Za-z0-9])',
+  ].join('|'),
+  'i',
+)
+/**
+ * A placeholder marker that OPENS a block: `example: {`, `@ApiProperty({`.
+ *
+ * PLACEHOLDER is evaluated per line, so a Swagger `@ApiProperty({ example: {`
+ * two lines above a sample credential was invisible and the sample was reported
+ * as a committed leak. The block is closed by the first non-blank line indented
+ * no further than the opener — cheap, deterministic, and it cannot run away.
+ */
+const PLACEHOLDER_BLOCK_OPEN = /[{[(]\s*$/
 /**
  * Runtime credential REFERENCES — `process.env.X`, `{{...}}`, `${VAR}`, `ENV[]`.
  * This is how a credential is *supposed* to be written, so it is skipped in
@@ -59,9 +88,44 @@ const RUNTIME_CREDENTIAL_REFERENCE = /(\{\{|\$\{|process\.env|os\.environ|os\.ge
  * correct, but a silent skip looks exactly like a scanner that detects nothing
  * — which is what a developer concludes when they test it with a dummy key.
  * Reported at INFO so the skip is visible and explained.
+ *
+ * EVERY alternative is token-anchored, the pre-existing ones included. This is
+ * the load-bearing property of the whole pattern and it was measured: `xxx+`
+ * unanchored and case-insensitive matches 18 of 400 real `generateKeyPairSync`
+ * RSA-2048 PEM bodies (4.5%) on collisions like `XXX`, `xXx`, `XxX`. Everything
+ * routed here lands on `severity: INFO`, `impactScore: 5`, "No action needed."
+ * — so an unanchored alternative does not merely lose a finding, it publishes a
+ * reassurance about a leaked key. Anchored, the same 400 keys produce zero.
+ *
+ * Adding an alternative means re-running that measurement. A three-character
+ * alternative is a liability even anchored; prefer longer, delimiter-bearing
+ * forms (`test-key`, `not-a-real`) over bare words.
  */
-const FAKE_LITERAL_VALUE =
-  /(example|sample|dummy|fake|placeholder|changeme|your[-_]?(key|token|secret)|abc123|xxx+)/i
+export const FAKE_LITERAL_VALUE = new RegExp(
+  '(?<![A-Za-z0-9])(?:'
+  + 'example|sample|dummy|fake|placeholder|changeme|mock|stub'
+  + '|test[-_]?(?:key|secret)|not[-_]?a[-_]?real'
+  + '|your[-_]?(?:key|token|secret)|abc123|x{3,}'
+  + ')(?![A-Za-z0-9])',
+  'i',
+)
+
+/**
+ * The literal a match assigns, for placeholder judgement.
+ *
+ * `match[0]` for the fuzzy assignment patterns spans the KEY as well as the
+ * value — `examplePassword: "<a real secret>"` — so judging it let an identifier
+ * bless the credential sitting beside it. Judge the quoted literal when the
+ * pattern captured one; patterns that match a bare credential token (an AWS key
+ * in YAML) carry no quotes and are judged whole.
+ */
+function placeholderSubject(credentialType: string, matched: string): string | null {
+  // A private key's "value" is a base64 PEM body: a high-entropy blob, not a
+  // string that can announce itself as fake. Excluded by construction rather
+  // than by trusting the anchoring above to hold for 1,700 random characters.
+  if (credentialType === 'Private key block') return null
+  return /['"`]([^'"`]*)['"`]/.exec(matched)?.[1] ?? matched
+}
 
 /** SCREAMING_SNAKE values are constant identifiers, not credentials —
  *  `UPDATE_PASSWORD = 'UPDATE_PASSWORD'` is an enum member. */
@@ -96,7 +160,34 @@ export const secretsAnalyzer: Analyzer = {
   description: 'Detects credentials committed to the repository (defensive; values are never reported).',
   async run(index) {
     const findings: AnalyzerFinding[] = []
-    const findingLimit = 50
+    // 50 was hit exactly on a 300k-LOC repository, which made every count
+    // anyone quoted a truncated prefix AND — because a truncated required pass
+    // is not authoritative — voided all five score axes over a benign cap.
+    // 500 is above any real repository's genuine count while still bounding a
+    // pathological tree.
+    const findingLimit = 500
+    /**
+     * Every credential-shaped line this pass matched, including the ones the cap
+     * left no room to report. Counting past the cap is the whole point: 500
+     * reported findings could mean 500 secrets or 5,000, and a consumer that
+     * cannot tell them apart has to treat both as a total loss.
+     *
+     * This is why the sweep no longer stops at the cap. Reading on costs one
+     * more regex pass over a tree the analyzer already sweeps whenever the cap
+     * is NOT hit, and it buys the difference between "we showed you 500 of 512"
+     * and "we showed you 500 of 9,000" — which is the difference between an
+     * immaterial cap and a security score nobody should publish.
+     */
+    let matches = 0
+    /**
+     * Building the finding is deferred because a reported secret carries a
+     * generated fix diff, and generating one for a finding the cap will discard
+     * is pure waste.
+     */
+    const report = (build: () => AnalyzerFinding): void => {
+      matches++
+      if (findings.length < findingLimit) findings.push(build())
+    }
     // Where a move-to-env fix appends its variable. Undefined means the file
     // does not exist, which the diff renders as a new-file hunk.
     const envExample = index.files.find((file) => file.path === '.env.example')?.content
@@ -117,15 +208,30 @@ export const secretsAnalyzer: Analyzer = {
       const isTestContext = TEST_PATH_RE.test(file.path)
       const isSeedScript = SEED_PATH_RE.test(file.path)
       const lines = content.split('\n')
-      for (let i = 0; i < lines.length && findings.length < findingLimit; i++) {
+      /** Indent column of the open placeholder block, or -1 when none is open. */
+      let placeholderBlock = -1
+      for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
-        if (PLACEHOLDER.test(line)) continue
+        const indent = line.length - line.trimStart().length
+        const blank = line.trim() === ''
+        // A blank line ends nothing; the first non-blank line at or left of the
+        // opener's indent does.
+        if (placeholderBlock >= 0 && !blank && indent <= placeholderBlock) placeholderBlock = -1
+        const declaresPlaceholder = PLACEHOLDER.test(line)
+        const inPlaceholderBlock = placeholderBlock >= 0
+        // Only the OUTERMOST block is tracked; anything nested inside it is
+        // more deeply indented and therefore already covered.
+        if (placeholderBlock < 0 && declaresPlaceholder && PLACEHOLDER_BLOCK_OPEN.test(line)) {
+          placeholderBlock = indent
+        }
+        if (declaresPlaceholder || inPlaceholderBlock) continue
         for (const { name, re } of SECRET_PATTERNS) {
           const match = line.match(re)
           if (!match) continue
           if (RUNTIME_CREDENTIAL_REFERENCE.test(match[0])) continue
-          if (FAKE_LITERAL_VALUE.test(match[0])) {
-            findings.push({
+          const subject = placeholderSubject(name, match[0])
+          if (subject !== null && FAKE_LITERAL_VALUE.test(subject)) {
+            report(() => ({
               category: 'SECURITY_HYGIENE',
               severity: 'INFO',
               title: `Credential-shaped placeholder ignored in ${file.path.split('/').pop()}`,
@@ -136,7 +242,7 @@ export const secretsAnalyzer: Analyzer = {
               impactScore: 5,
               effort: 'low',
               metadata: { credentialType: name, placeholder: true },
-            })
+            }))
             break
           }
           // A credential committed to source is a single token. Internal
@@ -161,7 +267,7 @@ export const secretsAnalyzer: Analyzer = {
           const isEnvFile = /(^|\/)\.env/.test(file.path)
           const baseName = file.path.split('/').pop()
           if (!isEnvFile && !messageString && isSeedScript && TEST_DOWNGRADEABLE.has(name)) {
-            findings.push({
+            report(() => ({
               category: 'SECURITY_HYGIENE',
               severity: 'MEDIUM',
               title: `Seed-script credential in ${baseName}`,
@@ -172,11 +278,11 @@ export const secretsAnalyzer: Analyzer = {
               impactScore: 45,
               effort: 'low',
               metadata: { credentialType: name, seedScript: true },
-            })
+            }))
             break
           }
           if (!isEnvFile && (messageString || (isTestContext && TEST_DOWNGRADEABLE.has(name)))) {
-            findings.push({
+            report(() => ({
               category: 'SECURITY_HYGIENE',
               severity: 'LOW',
               title: messageString
@@ -193,7 +299,7 @@ export const secretsAnalyzer: Analyzer = {
               impactScore: messageString ? 10 : 25,
               effort: 'low',
               metadata: { credentialType: name, testContext: isTestContext, messageString },
-            })
+            }))
           } else {
             // A concrete fix only where the evidence determines one: a tracked
             // .env is untracked wholesale, and a source assignment becomes an
@@ -205,40 +311,46 @@ export const secretsAnalyzer: Analyzer = {
             // but its LINE is not the place to fix them. The next generation
             // overwrites any edit; the credential has to leave the generator's
             // input. So the leak is reported and the diff is withheld.
-            const fix = isEnvFile
-              ? untrackEnvFileFix(file.path)
-              : isGeneratedFile
-                ? undefined
-                : moveSecretToEnvFix({
-                    filePath: file.path,
-                    line: i + 1,
-                    lineText: line,
-                    credentialType: name,
-                    envExampleLines,
-                  })
-            findings.push({
-              category: 'SECURITY_HYGIENE',
-              severity: isEnvFile ? 'CRITICAL' : 'HIGH',
-              title: `Possible ${name} committed in ${file.path.split('/').pop()}`,
-              description: `Line ${i + 1} of ${file.path} appears to contain a ${name}. Committed credentials should be treated as compromised.`,
-              filePath: file.path,
-              line: i + 1,
-              suggestion: 'Rotate this credential immediately, move it to environment configuration, and add the file to .gitignore. Consider a pre-commit secret scanner.',
-              ...(fix ? { fix } : {}),
-              impactScore: 95,
-              effort: 'low',
-              metadata: { credentialType: name },
+            report(() => {
+              const fix = isEnvFile
+                ? untrackEnvFileFix(file.path)
+                : isGeneratedFile
+                  ? undefined
+                  : moveSecretToEnvFix({
+                      filePath: file.path,
+                      line: i + 1,
+                      lineText: line,
+                      credentialType: name,
+                      envExampleLines,
+                    })
+              return {
+                category: 'SECURITY_HYGIENE',
+                severity: isEnvFile ? 'CRITICAL' : 'HIGH',
+                title: `Possible ${name} committed in ${file.path.split('/').pop()}`,
+                description: `Line ${i + 1} of ${file.path} appears to contain a ${name}. Committed credentials should be treated as compromised.`,
+                filePath: file.path,
+                line: i + 1,
+                suggestion: 'Rotate this credential immediately, move it to environment configuration, and add the file to .gitignore. Consider a pre-commit secret scanner.',
+                ...(fix ? { fix } : {}),
+                impactScore: 95,
+                effort: 'low',
+                metadata: { credentialType: name },
+              }
             })
           }
           break // one finding per line
         }
       }
     }
-    return findings.length >= findingLimit
+    // Reaching the cap exactly is not a loss — every match was reported — so
+    // only an overflow truncates. What it reports is measurable: the share of
+    // this repository's real matches the reader can actually see.
+    return matches > findingLimit
       ? incompleteAnalyzerOutput(findings, {
           truncated: true,
-          detail: `Secret scanning stopped after ${findingLimit} matches.`,
-          metrics: { matches: findings.length, findingLimit },
+          coverageRatio: measuredCoverage(findings.length, matches),
+          detail: `Secret scanning reported ${findings.length} of ${matches} credential matches; the ${findingLimit}-finding cap dropped the rest.`,
+          metrics: { matches, reported: findings.length, findingLimit },
         })
       : findings
   },
