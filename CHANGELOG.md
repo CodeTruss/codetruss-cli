@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.51 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.51),
+The current public release is [v0.2.52 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.52),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 The npm `latest` tag is still
 [`@codetruss/cli@0.2.50`](https://www.npmjs.com/package/@codetruss/cli/v/0.2.50):
@@ -15,6 +15,75 @@ were superseded before distribution.
 ## Unreleased
 
 No unreleased changes.
+
+## 0.2.52 — 2026-08-08
+
+Three corrections to published artifacts. No behaviour changes.
+
+- **`--yes` never required `--allow`, and this README said it did.** The
+  sentence read: "Non-interactive `--yes` setup requires explicit `--allow`
+  values." `resolveAllowGlobs` does close to the opposite. Given no explicit
+  value it adopts every conventional source directory that exists at the
+  repository root — `src`, `app`, `apps`, `packages`, `lib`, `components`,
+  `server`, `client`, `public`, `test`, `tests`, `e2e`, `spec`, `docs` — as
+  `<dir>/**`, prints what it adopted, and continues. It refuses only when none
+  of the fourteen exist. `codetruss setup --yes --hooks none` on a repository
+  holding `src/` and `tests/` exits 0 having adopted `src/**, tests/**`.
+
+  A safety claim we overstate is the worst direction to be wrong in. That
+  sentence invited a reader to believe an unattended run could not adopt a scope
+  they had not chosen, and it can. The behaviour itself is deliberate and stays:
+  an unattended run on an ordinary repository should end up protected rather
+  than halted over glob syntax, the adopted list is printed so the decision
+  stays auditable, no repository-wide glob is ever adopted, and the genuinely
+  dangerous decision — trusting repository verification commands — is still
+  withheld without `--trust-verify`. What was false was the documentation, so
+  the documentation is what changed, here and in the repository README and
+  `docs/codetruss-cli-guide.md`, which each carried a version of the same claim.
+
+  The corrected text also names the two ways a detected scope goes wrong. It can
+  be wider than intended. It is also blind to a source directory outside that
+  list: on `sindresorhus/ky`, whose sources live in `source/`, `--yes` adopts
+  `test/**` alone and leaves the entire source tree out of scope, so ordinary
+  changes read as scope drift. Pass `--allow` whenever the scope matters;
+  explicit values are used verbatim and nothing is detected.
+
+- **Correction to the 0.2.51 entry: the commit block is real, but uninstalling
+  was not the only escape.** That entry said: "Because `codetruss setup`
+  installs a pre-commit hook, FAILED also blocked the next `git commit`, with
+  uninstalling as the only escape." A review of this release could not reproduce
+  the block and the claim was nearly retracted whole. It does reproduce. On a
+  clean clone of `sindresorhus/ky` at `3419113` with published 0.2.50, after
+  `codetruss setup --yes --allow "source/**" --allow "test/**"`, appending one
+  comment line to either `source/index.ts` or `source/utils/merge.ts` and
+  committing it prints `CodeTruss FAILED: commit blocked`, exits non-zero, and
+  leaves `HEAD` unmoved. Both configurations block.
+
+  The failed reproduction was a `PATH` artifact, and it is one users will hit.
+  The installed hook invokes bare `codetruss`, so whichever build resolves first
+  on `PATH` decides the verdict. With a stale global 0.2.28 resolving ahead of
+  the 0.2.50 under test, the identical staged change prints `REVIEW_REQUIRED`
+  and the commit lands with exit 0 — an older CLI, predating the behaviour,
+  quietly answering for the one being tested. `codetruss setup` already warns
+  about this by name, and the warning deserved more weight than it got.
+
+  What was genuinely wrong is narrower and is ours: `git commit --no-verify`
+  escapes a blocking hook, and it did on 0.2.50. Uninstalling was never the only
+  way out. The 0.2.51 artifact is published and immutable, so its text stands as
+  shipped and this entry is the correction.
+
+- **The scoring model has a reviewable diff again.**
+  `packages/analyzer-engine/src/scoring.ts` carried two raw NUL bytes as map-key
+  separators inside template literals, so git classified the file as binary.
+  0.2.47's rewrite of `deduct()` — adding `dedupeByLocation` and the logarithmic
+  `occurrenceFactor` decay — therefore rendered as `Bin 5166 -> 8676 bytes, 0
+  additions, 0 deletions`. The model behind every number we put in front of a
+  customer could change with nothing to read. Both separators are now written as
+  the six-character escape. The runtime strings are identical, the analyzer
+  suites pass unchanged, and `dist/cli.cjs` built from the corrected source is
+  byte-for-byte the bundle built from the old source, so no behaviour in this
+  release turns on it. It was the last tracked source file in the repository
+  carrying raw NUL bytes.
 
 ## 0.2.51 — 2026-08-08
 
