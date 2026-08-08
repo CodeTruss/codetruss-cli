@@ -209,6 +209,32 @@ export interface NCall {
   isConstruct: boolean
 }
 
+/**
+ * True when the expression is a TAGGED TEMPLATE LITERAL — ``tag`…${x}…` ``.
+ *
+ * The distinction from a plain template literal is structural, not lexical: a
+ * tagged template hands the static text and each interpolated value to the tag
+ * as SEPARATE arguments. The values never enter the string, so the tag — not
+ * the caller — decides how they are combined. For a query builder that is
+ * exactly parameter binding, which is why this shape is the *safe*
+ * construction of every SQL library that offers it (drizzle's `sql`, Prisma's
+ * `$queryRaw`, postgres.js, slonik, `@vercel/postgres`) and why an untagged
+ * ``db.query(`… ${x}`)`` — where the value IS concatenated into the string —
+ * is not this shape and keeps its finding.
+ *
+ * Expressed as a shape rather than a list of tag names so a library we have
+ * never heard of is covered without another patch. The residual unsoundness is
+ * stated: a tag that concatenates rather than binds would be exempted too. No
+ * SQL library does that, and the escape hatches that exist for it are named
+ * calls (`sql.raw`, `$queryRawUnsafe`) which remain sinks in their own right.
+ */
+export function isTaggedTemplate(node: SyntaxNode, lang: SastLanguage): boolean {
+  if (!isJsFamily(lang)) return false
+  const n = unwrap(node, lang)
+  if (n.type !== 'call_expression') return false
+  return field(n, 'arguments')?.type === 'template_string'
+}
+
 const CALL_TYPES: Record<SastLanguage, Set<string>> = {
   javascript: new Set(['call_expression', 'new_expression']),
   typescript: new Set(['call_expression', 'new_expression']),

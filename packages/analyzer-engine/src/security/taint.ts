@@ -520,6 +520,20 @@ export function paramIndexes(origins: Origins): number[] {
   return origins.filter((o): o is Extract<Origin, { kind: 'param' }> => o.kind === 'param').map((o) => o.index)
 }
 
+/**
+ * The single parameter an expression came from, when that is ALL it came from.
+ *
+ * Returns null the moment anything else is mixed in — a real source, a second
+ * parameter — because the caller of this (the caller-supplied-argument report)
+ * is making a claim about provenance, not about danger: "this value is exactly
+ * what one caller passed". A merged value is not that.
+ */
+export function soleParamOrigin(origins: Origins): Extract<Origin, { kind: 'param' }> | null {
+  if (origins.length !== 1) return null
+  const only = origins[0]
+  return only.kind === 'param' ? only : null
+}
+
 /** First real source origin, for flow reporting. */
 export function firstSource(origins: Origins): Extract<Origin, { kind: 'source' }> | null {
   return origins.find((o): o is Extract<Origin, { kind: 'source' }> => o.kind === 'source') ?? null

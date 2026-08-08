@@ -141,11 +141,94 @@ const TEST_PATH_RE =
   /(^|\/)(tests?|__tests__|__mocks__|fixtures|spec)\/|\.(test|spec)\.|_(test|spec)\.(go|py|rb|exs?)$|(^|\/)(test|spec)_[^/]+\.(py|rb)$/
 
 /**
- * Only the fuzzy generic-password pattern is eligible for the test-fixture
+ * Only the fuzzy generic-password pattern is eligible for the SEED-script
  * downgrade: every other pattern matches an unambiguous production credential
- * format, which is a real leak even when pasted into a test file.
+ * format, which is a real leak even when pasted into a seed file.
  */
 const TEST_DOWNGRADEABLE = new Set(['Generic password assignment'])
+
+/**
+ * Typed credential patterns that a test path may downgrade — but ONLY together
+ * with {@link hasSyntheticSequence}, never on the path alone.
+ *
+ * The path is not evidence. A real key pasted into `checkout.e2e.ts` is exactly
+ * the leak this analyzer exists to catch, and a path-only exemption wide enough
+ * to clear a repository's secret-scanner fixtures would clear that too. So the
+ * downgrade is a conjunction: the file has to be a test AND the value's body has
+ * to be a hand-typed sequence rather than a random draw.
+ *
+ * Two patterns are deliberately absent:
+ *  - **Database URL with credentials.** A production DSN pasted into a fixture
+ *    is one of the commonest ways a live credential reaches a public repo, and
+ *    the host in it is the thing at risk. Adjudicated and kept out on purpose.
+ *  - **Private key block.** A committed PEM is a real key wherever it sits; the
+ *    cross-tool corpus judged both of these CORRECT (firecrawl's TLS-skip
+ *    fixture, axios's `key.pem`) and they must keep firing.
+ */
+const TYPED_TEST_DOWNGRADEABLE = new Set([
+  'AWS access key',
+  'GitHub token',
+  'Stripe live secret key',
+  'Anthropic API key',
+  'OpenAI API key',
+  'Google API key',
+  'Slack token',
+])
+
+/**
+ * Consecutive characters, ascending or descending by one, before a value stops
+ * looking drawn at random. Nine is what `AKIA1234567890ABCDEF` gives (the digit
+ * run breaks at `9`→`0`), so the floor sits just below it.
+ */
+const SYNTHETIC_RUN = 8
+
+/** Longest run of characters each exactly one step from the previous. */
+function longestStepRun(chars: string): number {
+  let best = chars.length > 0 ? 1 : 0
+  let run = 1
+  let direction = 0
+  for (let i = 1; i < chars.length; i++) {
+    const step = chars.charCodeAt(i) - chars.charCodeAt(i - 1)
+    if (step === direction && (step === 1 || step === -1)) run++
+    else if (step === 1 || step === -1) {
+      direction = step
+      run = 2
+    } else {
+      direction = 0
+      run = 1
+    }
+    if (run > best) best = run
+  }
+  return best
+}
+
+/**
+ * Whether a credential body was TYPED rather than generated.
+ *
+ * Real credentials are random over their alphabet; the fixtures that flooded
+ * the cross-tool corpus were people walking the keyboard —
+ * `AKIA1234567890ABCDEF`, `ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ`,
+ * `sk-proj-Ab12_Cd34-Ef56Gh78…`. The letters and the digits are projected out
+ * separately and case-folded, because the third example interleaves them: its
+ * letters alone spell the alphabet while its digits alone count.
+ *
+ * Anchored the same way {@link FAKE_LITERAL_VALUE} is, and for the same reason
+ * — a predicate that silently downgrades a leak has to be measured, not
+ * assumed. A run of eight in a random base62 body needs seven consecutive
+ * successes at 1/26 (letters) or 1/10 (digits); the test suite draws 20,000
+ * bodies and requires zero hits.
+ */
+export function hasSyntheticSequence(value: string): boolean {
+  const letters = value.replace(/[^A-Za-z]/g, '').toLowerCase()
+  if (longestStepRun(letters) >= SYNTHETIC_RUN) return true
+  return longestStepRun(value.replace(/\D/g, '')) >= SYNTHETIC_RUN
+}
+
+/** Whether a match in a test path may be downgraded to LOW. */
+function downgradeableInTests(credentialType: string, matched: string): boolean {
+  if (TEST_DOWNGRADEABLE.has(credentialType)) return true
+  return TYPED_TEST_DOWNGRADEABLE.has(credentialType) && hasSyntheticSequence(matched)
+}
 
 /**
  * Database seed / fixture scripts. Their credentials are deliberate, documented
@@ -281,7 +364,8 @@ export const secretsAnalyzer: Analyzer = {
             }))
             break
           }
-          if (!isEnvFile && (messageString || (isTestContext && TEST_DOWNGRADEABLE.has(name)))) {
+          const typedFixture = isTestContext && TYPED_TEST_DOWNGRADEABLE.has(name)
+          if (!isEnvFile && (messageString || (isTestContext && downgradeableInTests(name, match[0])))) {
             report(() => ({
               category: 'SECURITY_HYGIENE',
               severity: 'LOW',
@@ -290,7 +374,9 @@ export const secretsAnalyzer: Analyzer = {
                 : `Test fixture resembling a secret: ${name} in ${baseName}`,
               description: messageString
                 ? `Line ${i + 1} of ${file.path} assigns a credential-shaped key a value containing spaces, which reads as display text (a validation message, translation, or label) rather than a credential. Reported for awareness only — confirm no real passphrase was pasted here.`
-                : `Line ${i + 1} of ${file.path} contains a value shaped like a ${name}. It sits in test/fixture code and does not match a production key format, so it is most likely a fixture — but confirm no real credential was pasted.`,
+                : typedFixture
+                  ? `Line ${i + 1} of ${file.path} contains a value shaped like a ${name}. It sits in test/fixture code AND its body is a typed sequence (runs of consecutive letters or digits) rather than a random credential, so it is most likely a fixture — but confirm no real credential was pasted. A ${name} with a random body in this same file is still reported as a leak.`
+                  : `Line ${i + 1} of ${file.path} contains a value shaped like a ${name}. It sits in test/fixture code and does not match a production key format, so it is most likely a fixture — but confirm no real credential was pasted.`,
               filePath: file.path,
               line: i + 1,
               suggestion: messageString
@@ -298,7 +384,7 @@ export const secretsAnalyzer: Analyzer = {
                 : 'Use an obviously fake placeholder (e.g. "test-not-a-real-key") so scanners and reviewers can dismiss it at a glance.',
               impactScore: messageString ? 10 : 25,
               effort: 'low',
-              metadata: { credentialType: name, testContext: isTestContext, messageString },
+              metadata: { credentialType: name, testContext: isTestContext, messageString, ...(typedFixture ? { syntheticSequence: true } : {}) },
             }))
           } else {
             // A concrete fix only where the evidence determines one: a tracked

@@ -7,8 +7,19 @@ import type { SastLanguage } from './lang'
  * deliberate SUBSET, and the subset is a precision decision, not a packaging
  * one: every rule listed here has been differentially validated — same rule,
  * same file, zero disagreement against the hosted tree-sitter parser — across
- * the real-repository corpus, and adjudicated to zero false positives. A rule
- * earns its way into this list; it is not added because it compiles.
+ * the real-repository corpus. A rule earns its way into this list; it is not
+ * added because it compiles.
+ *
+ * CORRECTION (0.2.53). This comment used to end "and adjudicated to zero false
+ * positives". That was true of the eight-repository corpus it was written
+ * against and false as a general claim, and the difference mattered: on a
+ * ten-repository corpus nobody here chose, `sql-injection` reported drizzle's
+ * `db.execute(sql`…`)` — bound parameters, the documented safe construction —
+ * as CRITICAL "untrusted input is concatenated", and missed a genuinely dynamic
+ * `client.query(query)` in the same run. Both are fixed. The claim this comment
+ * now makes is the narrower one it can support: differential parser validation,
+ * plus whatever the published corpus measurements say on the day you read them.
+ * A zero adjudicated on a corpus we picked is a property of the corpus.
  *
  * The five AI-agent defect rules are the classes coding agents actually get
  * wrong (floating writes, swallowed errors, coercion comparisons, N+1 loops,

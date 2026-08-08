@@ -24,6 +24,7 @@ const FROZEN_MARKDOWN_SHA256: Record<string, string> = {
   'local-registry-v2': '113d62dee72cce21ca004ce3bf748cc8ff08a8bcceacfdc65100c5b21487dea2',
   'local-registry-v3': 'f38a8bde572f2c83ddcd76e167762acc80c0e603d2e45a43d3b4dd86aef1579a',
   'local-registry-v4': '288de3e266dd208735854a35ec467caa44307414121020e062eec58e808cb66b',
+  'local-registry-v5': '6ae337ce26c127531cb97aa5418f64fa2681898228c3a53ba25eb2777b9e1703',
 }
 
 /** Every analysis profile whose Markdown wording is frozen inside signed receipts. */
@@ -31,7 +32,8 @@ const FROZEN_PROFILES = [
   { id: 'local-registry-v1', profile: { id: 'local-registry-v1', omittedPasses: ['graph', 'sast'], scoreStatus: 'not-computed' } },
   { id: 'local-registry-v2', profile: { id: 'local-registry-v2', omittedPasses: ['graph'], localPasses: ['local-sast'], scoreStatus: 'not-computed' } },
   { id: 'local-registry-v3', profile: { id: 'local-registry-v3', omittedPasses: ['graph'], localPasses: ['local-sast'], scoreStatus: 'not-computed' } },
-  { id: 'local-registry-v4', profile: LOCAL_ANALYSIS_PROFILE },
+  { id: 'local-registry-v4', profile: { id: 'local-registry-v4', omittedPasses: ['graph'], localPasses: ['local-sast'], scoreStatus: 'not-computed' } },
+  { id: 'local-registry-v5', profile: LOCAL_ANALYSIS_PROFILE },
 ] as const
 
 function fixture(profile: unknown = LOCAL_ANALYSIS_PROFILE, patch = 'diff evidence'): Receipt {

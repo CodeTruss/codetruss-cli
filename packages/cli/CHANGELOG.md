@@ -5,6 +5,138 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.53 — 2026-08-08
+
+We published what we missed. This release publishes what we got wrong.
+
+A cross-tool benchmark ran CodeTruss 0.2.51 and Semgrep CE over **ten
+repositories selected by a stated rule rather than by us** (top-starred, active,
+size-bounded — `docs/benchmarks/cross-tool-2026-08`). It found false positives
+that our own eight-repository sweep did not, including a CRITICAL. All three
+fixes below were validated on that corpus, before and after, per repository and
+per rule; the numbers are measured, not projected.
+
+**Corpus result, published 0.2.51 → this release, same machine, same day.**
+Total findings 898 → 904. Eight of the ten repositories are byte-identical;
+`firecrawl/firecrawl` 155 → 154 and `louislam/uptime-kuma` 92 → 99 are the only
+movements. Rule `sql-injection` 1 → 7. CRITICAL findings 3 → 2. HIGH-or-CRITICAL
+security findings 77 → 58, of which the share sitting in test/fixture paths
+falls from 62 (80.5%) to 37 (63.8%). Re-checked against the benchmark's 30
+hand-adjudicated findings: **zero findings judged correct disappeared.**
+
+- **A parameterized drizzle query was reported as CRITICAL SQL injection.**
+  `firecrawl/firecrawl` `apps/api/src/db/rpc.ts:98` is
+  ``db.execute(sql`select … ${params.team_id} …`)``. A tagged template hands its
+  interpolations to the tag as separate bound values; they never enter the
+  string. We reported it CWE-89 CRITICAL with the words "untrusted input is
+  concatenated into a SQL query", which is the opposite of what the code does.
+
+  The rule already carried this exemption for Prisma — a source comment reading
+  "tagged `$queryRaw`/`$executeRaw` templates are parameterized by Prisma and
+  must NOT flag" — but expressed it as a method-name list, so drizzle got
+  nothing. The fix is the SHAPE, not the library: any tagged template literal in
+  a SQL sink's query position is the parameterized construction and is not
+  reported. drizzle's `sql`, postgres.js, slonik, `@vercel/postgres` and the
+  next library with the same shape are covered without another patch. An
+  **untagged** template literal in the same sink still fires, because that value
+  really is spliced into the string, and drizzle's documented escape hatch
+  `sql.raw()` is an ordinary call, so it remains a sink in its own right —
+  including nested inside a tagged template.
+
+- **The same rule was silent on a genuinely dynamic query.**
+  `louislam/uptime-kuma` `server/monitor-types/postgres.js:63` is
+  `client.query(query, …)` where `query` is the enclosing method's parameter,
+  carrying the user-configured `monitor.databaseQuery`. Semgrep flagged it; our
+  pass reported nothing in that file. The cause was neither the sink list nor
+  the `.js` extension: a bare function parameter has never been a "real source",
+  so it could only ever be reported one hop later, at a call site in the same
+  file passing tainted data into it — and there is no such call site here.
+
+  SQL now reports it directly, at **HIGH** rather than CRITICAL, with a message
+  that says what is and is not known: this function executes the SQL text its
+  caller supplies, nothing in the file constrains it, and whether it is
+  injectable is decided by callers the analysis cannot see. Deliberately narrow,
+  and every narrowing below was forced by the corpus rather than guessed:
+
+  - The argument must BE the parameter, not a local built from one.
+    `firecrawl` `apps/api/src/services/worker/nuq.ts:1028` assembles its query
+    from a template two lines above; the file builds it in view, so
+    "supplied by the caller" would be false about it.
+  - The receiver must be database-shaped. `query` is a SQL sink on any receiver
+    once a request source has been traced into it; with only a parameter behind
+    the argument, the receiver is the whole case that this is a database —
+    `this.query(rightIndex)` in `trekhleb/javascript-algorithms`'
+    `FenwickTree.queryRange` is a prefix-sum lookup and fired twice before this
+    gate.
+  - Any same-file call site binding a constant or a tagged template to that
+    parameter suppresses it, which is what keeps firecrawl's
+    `execRows(db, sql`…`)` helper quiet.
+  - An anonymous enclosing function is skipped: the suppression resolves call
+    sites by name, so a nameless function could never be shown to be
+    constrained. Stated recall cost — this never reaches `const run = (sql) =>
+    pool.query(sql)`.
+
+  On the corpus this reports seven findings, all in uptime-kuma: the same
+  monitor shape repeated across its Postgres, MySQL, MSSQL and OracleDB drivers.
+  Semgrep found one of the four.
+
+- **Synthetic credentials in test files were reported HIGH as committed leaks.**
+  43% of our security findings on this corpus sat in test/fixture paths against
+  Semgrep's 2%, and nine of the eleven hand-judged-incorrect findings were one
+  shape: `AKIA1234567890ABCDEF`, `ghp_abcdefghijklmnopqrstuvwxyz…`,
+  `sk-proj-Ab12_Cd34-Ef56…` flagged as credentials that "should be treated as
+  compromised". Three of them were inside a repository's unit tests **for its
+  own secret scanner**.
+
+  The test-context downgrade existed but reached only the fuzzy generic-password
+  pattern. It now reaches typed credentials — AWS, GitHub, Stripe, Anthropic,
+  OpenAI, Google, Slack — as a **conjunction**, never on the path alone: the file
+  must be a test AND the credential body must be a typed sequence rather than a
+  random draw. The predicate projects out the letters and the digits separately,
+  case-folded, and looks for a run of eight consecutive characters; that is what
+  catches `sk-proj-Ab12_Cd34-Ef56Gh78…`, whose letters alone spell the alphabet
+  while its digits alone count. It is measured the way the existing placeholder
+  matcher is: 20,000 random 40-character base62 bodies, zero hits, asserted in
+  the suite. A real key pasted into an `.e2e.ts` still reports HIGH, which a
+  path-only exemption wide enough to clear these fixtures would not.
+
+  Two patterns stay out on purpose. **Database URLs**, because a production DSN
+  pasted into a fixture is a common way a live credential reaches a public repo
+  — an earlier adjudication settled that and this release does not reopen it.
+  **Private key blocks**, because a committed PEM is a real key wherever it
+  sits; the corpus judged both of its PEM findings correct and both still fire.
+
+  Measured: 25 typed-credential HIGH findings in test paths became LOW "test
+  fixture resembling a secret". Two did not, and both are honest residuals
+  rather than fixes we withheld — `sk-admin-AAAA_BBBB-CCCC_DDDD-…` is a
+  repeated-block placeholder, not a monotone run, and
+  `sk-learning-rate-schedule-was-tuned-carefully` is the OpenAI pattern
+  over-matching hyphenated prose.
+
+- **What this release does NOT fix, from the same corpus.** The two remaining
+  CRITICALs are `excalidraw`'s `.env.development:17` and `.env.production:17`,
+  both `VITE_APP_FIREBASE_CONFIG` web `apiKey` values that Google documents as
+  public client identifiers compiled into the browser bundle. The benchmark
+  judged them incorrect. They are unchanged here, and the honest reason is that
+  the fix is a different one — recognising publishable client identifiers, not a
+  test-path or value-shape rule — and it has not been designed or measured yet.
+
+- **The analysis profile is `local-registry-v5`.** v4's block states that CWE-89
+  means "untrusted input tracked from request sources through string building
+  into query execution". That is no longer all the rule reports, so the wording
+  changed and the id changed with it. Every v4 receipt keeps rendering the
+  sentence it was signed with, byte for byte, from a frozen renderer.
+
+- **Two source comments overstated what had been measured.** The CLI rule subset
+  was documented as "differentially validated … and adjudicated to zero false
+  positives", and the local pass as validated "at zero false positives". The
+  differential-parser half is true and stays. The zero-false-positive half was
+  true of a corpus we chose and is now falsified, so it is gone from both
+  comments and replaced with what happened. The published benchmark page, the
+  homepage, the comparison page and the benchmark blog post carry the same
+  correction: the eight-repository result stands as a result on those eight, and
+  no longer stands unqualified.
+
 ## 0.2.52 — 2026-08-08
 
 Three corrections to published artifacts. No behaviour changes.

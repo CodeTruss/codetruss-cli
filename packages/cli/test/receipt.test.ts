@@ -125,7 +125,7 @@ describe('signed receipts', () => {
     await expect(verifyReceipt(dir, receipt.sessionId)).resolves.toMatchObject({ verdict: 'PASS' })
     const markdown = await readFile(paths.markdown, 'utf8')
     expect(markdown).toContain('Policy SHA-256')
-    expect(markdown).toContain('Profile: `local-registry-v4`')
+    expect(markdown).toContain('Profile: `local-registry-v5`')
     expect(markdown).not.toContain('Final scores:')
     await writeFile(paths.markdown, `${await readFile(paths.markdown, 'utf8')}tampered`)
     await expect(verifyReceipt(dir, receipt.sessionId)).rejects.toThrow('Markdown receipt does not match')
@@ -226,7 +226,7 @@ describe('signed receipts', () => {
 
   it('states the new registry count and the abstraction-shape limit on a current receipt', () => {
     const markdown = renderMarkdown(fixture('/tmp/repo'))
-    expect(markdown).toContain('Profile: `local-registry-v4`')
+    expect(markdown).toContain('Profile: `local-registry-v5`')
     expect(markdown).toContain('The 15 deterministic registry analyzers ran locally on this machine')
     expect(markdown).toContain('**Abstraction-shape analysis.**')
     expect(markdown).toContain('says nothing either way about those shapes')
