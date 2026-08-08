@@ -111,6 +111,110 @@ export const FAKE_LITERAL_VALUE = new RegExp(
 )
 
 /**
+ * PUBLISHABLE CLIENT IDENTIFIERS — credentials whose exposure is by design.
+ *
+ * Some credential formats are not secrets at all. A Firebase **web** `apiKey`, a
+ * Google Maps browser key: these are compiled into the client bundle, Google
+ * documents them as public identifiers, and what protects the project is
+ * Security Rules, App Check and per-key restrictions — never keeping the value
+ * out of the repository. Reporting one as a committed credential is wrong, and
+ * "treat as compromised, rotate immediately" is wrong advice about it.
+ *
+ * A publishable identifier is recognised from the credential TYPE plus its
+ * surroundings, never from either alone. Only types listed here are eligible,
+ * so the widest imaginable surroundings can never downgrade a Stripe live key or
+ * a PEM block — and eligibility alone downgrades nothing, because a Google API
+ * key is just as often a server key.
+ */
+const PUBLISHABLE_CREDENTIAL_TYPES = new Set(['Google API key'])
+
+/**
+ * Build-time variable prefixes that mean "this value ships to the browser".
+ *
+ * Vite, Next.js, Create React App, SvelteKit and Astro each inline variables
+ * carrying these prefixes into the client bundle. The prefix is not a hint about
+ * intent — it is the framework's guarantee that the value is already public to
+ * every visitor, which is precisely why a committed one is not the leak.
+ *
+ * Four prefixes, each a documented convention of a major framework. Adding a
+ * fifth widens what this analyzer will decline to escalate, so it is a
+ * deliberate act and not a matter of being generous with synonyms.
+ */
+const PUBLISHABLE_ENV_BINDING = /\b((?:VITE_|NEXT_PUBLIC_|REACT_APP_|PUBLIC_)[A-Z0-9_]*)\s*[:=]/
+
+/**
+ * The keys a Firebase **web** app config carries beside `apiKey`, as object
+ * keys (`authDomain:` or `"authDomain":`). Exact case, because that is how
+ * Firebase documents and how its console emits them; a looser spelling buys
+ * nothing and widens an exemption.
+ */
+const FIREBASE_WEB_CONFIG_KEYS = [
+  'authDomain',
+  'projectId',
+  'storageBucket',
+  'messagingSenderId',
+  'appId',
+  'databaseURL',
+  'measurementId',
+].map((key) => new RegExp(`['"]?${key}['"]?\\s*:`))
+
+/**
+ * How many of {@link FIREBASE_WEB_CONFIG_KEYS} must sit beside the key before
+ * the object is a Firebase web config rather than something that merely holds
+ * an `apiKey`. Three, because Firebase's console emits six or seven and the
+ * threshold is the only thing standing between this exemption and a real key.
+ */
+const FIREBASE_WEB_CONFIG_SIBLINGS = 3
+
+/**
+ * Lines either side of the match that count as "beside" it. A web config is at
+ * most eight keys, so its siblings are within eight lines of `apiKey` whether it
+ * is written as one JSON line in a `.env` or spread down an `initializeApp({…})`
+ * argument.
+ */
+const FIREBASE_WEB_CONFIG_WINDOW = 8
+
+/**
+ * The binding itself: `apiKey` assigned a value in Google's documented web-key
+ * format, on ONE line. Both halves are load-bearing and neither is sufficient.
+ */
+const FIREBASE_WEB_API_KEY_BINDING = /['"]?apiKey['"]?\s*:\s*['"]AIza[0-9A-Za-z_-]{35}['"]/
+
+/**
+ * Whether this line's Google API key is a Firebase **web** config key.
+ *
+ * The second recogniser, and the one that does not need an environment file: the
+ * config object itself. `initializeApp({ apiKey, authDomain, projectId, … })`
+ * written straight into client source carries no `VITE_`-style name, and is the
+ * same public identifier as the `.env` spelling.
+ *
+ * The predicate is a CONJUNCTION of three things, because the obvious shortcut —
+ * exempting the key name `apiKey` — would hide real API keys in every codebase,
+ * which is a far worse defect than the one it fixes:
+ *
+ *  1. the line binds the literal key `apiKey` (not `API_KEY`, not `googleKey`);
+ *  2. its value is in Google's `AIza` + 35-character web-key format;
+ *  3. at least {@link FIREBASE_WEB_CONFIG_SIBLINGS} of the Firebase config's
+ *     other keys appear as object keys within
+ *     {@link FIREBASE_WEB_CONFIG_WINDOW} lines.
+ *
+ * So it does NOT match: a Google API key under any other name; an `apiKey` whose
+ * value is not `AIza…` (Stripe, OpenAI, an internal key); an `AIza…` Maps or
+ * YouTube key that happens to sit near a Firebase block but is bound to its own
+ * name; or a Firebase **admin** service-account JSON, whose keys are snake_case
+ * and whose actual secret is a PEM block the private-key pattern still reports.
+ */
+export function isFirebaseWebApiKey(lines: readonly string[], index: number): boolean {
+  if (!FIREBASE_WEB_API_KEY_BINDING.test(lines[index])) return false
+  const context = lines
+    .slice(Math.max(0, index - FIREBASE_WEB_CONFIG_WINDOW), index + FIREBASE_WEB_CONFIG_WINDOW + 1)
+    .join('\n')
+  let siblings = 0
+  for (const key of FIREBASE_WEB_CONFIG_KEYS) if (key.test(context)) siblings += 1
+  return siblings >= FIREBASE_WEB_CONFIG_SIBLINGS
+}
+
+/**
  * The literal a match assigns, for placeholder judgement.
  *
  * `match[0]` for the fuzzy assignment patterns spans the KEY as well as the
@@ -130,6 +234,63 @@ function placeholderSubject(credentialType: string, matched: string): string | n
 /** SCREAMING_SNAKE values are constant identifiers, not credentials —
  *  `UPDATE_PASSWORD = 'UPDATE_PASSWORD'` is an enum member. */
 const CONSTANT_IDENTIFIER_VALUE = /^[A-Z0-9]+(_[A-Z0-9]+)+$/
+
+/**
+ * An identifier or slug broken into its lowercase words, so the two casings a
+ * codebase uses for the same name compare equal: `IncorrectEmailPassword` and
+ * `incorrect-email-password` both yield `[incorrect, email, password]`.
+ */
+function identifierWords(text: string): string[] {
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2') // camelCase  -> camel Case
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2') // HTTPServer -> HTTP Server
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((word) => word.toLowerCase())
+}
+
+/** True when `needle` appears as a contiguous run of words inside `haystack`. */
+function isWordRun(needle: string[], haystack: string[]): boolean {
+  if (needle.length === 0 || needle.length > haystack.length) return false
+  for (let start = 0; start + needle.length <= haystack.length; start++) {
+    if (needle.every((word, offset) => haystack[start + offset] === word)) return true
+  }
+  return false
+}
+
+/** The full identifier the pattern matched on, which spans further left than
+ *  the match: `password` is where `IncorrectEmailPassword` ends, not begins. */
+function assignedKey(line: string, matchIndex: number): string {
+  const identifierChar = /[A-Za-z0-9_$]/
+  let start = matchIndex
+  while (start > 0 && identifierChar.test(line[start - 1])) start--
+  let end = matchIndex
+  while (end < line.length && identifierChar.test(line[end])) end++
+  return line.slice(start, end)
+}
+
+/**
+ * A value that merely spells out its own KEY — `IncorrectPassword =
+ * "incorrect-password"`. Its words are a contiguous run of the key's words, so
+ * it carries no information the identifier beside it did not already carry.
+ * That is what an enum member, an error code, or an action constant looks like;
+ * a credential is the opposite, a value the key cannot predict.
+ *
+ * The narrow shape matters. `password: "correct-horse-battery-staple"` is a
+ * real passphrase in kebab case, so exempting kebab-case values wholesale would
+ * suppress genuine leaks — the exemption has to be the RELATION to the key, not
+ * the shape of the value. The relation is deliberately one-directional: words
+ * dropped from the key are fine (`UserMissingPassword = "missing-password"`),
+ * words ADDED to it are not, because added words are where entropy would live.
+ *
+ * A one-word restatement (`password = "password"`) stays reported. It is not an
+ * enum member — it is a credential that happens to be worthless, and the two
+ * are indistinguishable from the key alone.
+ */
+function restatesItsKey(line: string, matchIndex: number, value: string): boolean {
+  const valueWords = identifierWords(value)
+  return valueWords.length >= 2 && isWordRun(valueWords, identifierWords(assignedKey(line, matchIndex)))
+}
 
 /** Dev/CI dummy hosts — credentials pointing here are not real secrets. */
 const DUMMY_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', 'host.docker.internal'])
@@ -328,6 +489,43 @@ export const secretsAnalyzer: Analyzer = {
             }))
             break
           }
+          // Publishable client identifiers, before any severity is assigned —
+          // including the `.env` escalation below, which is what made these
+          // CRITICAL. The file being a committed `.env` is not evidence about a
+          // value the framework publishes to every visitor anyway.
+          if (PUBLISHABLE_CREDENTIAL_TYPES.has(name)) {
+            if (isFirebaseWebApiKey(lines, i)) {
+              report(() => ({
+                category: 'SECURITY_HYGIENE',
+                severity: 'INFO',
+                title: `Firebase web API key (public by design) in ${file.path.split('/').pop()}`,
+                description: `Line ${i + 1} of ${file.path} binds \`apiKey\` to a Google web-format key surrounded by a Firebase web app config (authDomain, projectId, storageBucket, messagingSenderId, appId). That config is compiled into the browser bundle by design and Google documents this key as a public client identifier, not a secret, so it is NOT reported as a leak. A Google API key under any other name, or one whose neighbours are not this config, is still reported.`,
+                filePath: file.path,
+                line: i + 1,
+                suggestion: 'No action needed for the key itself — it is already public in every client that loads this app. What protects the project is Firebase Security Rules, App Check, and an application restriction on the key in the Google Cloud console; confirm those are in place.',
+                impactScore: 5,
+                effort: 'low',
+                metadata: { credentialType: name, publishableClientKey: true, firebaseWebConfig: true },
+              }))
+              break
+            }
+            const published = PUBLISHABLE_ENV_BINDING.exec(line)
+            if (published) {
+              report(() => ({
+                category: 'SECURITY_HYGIENE',
+                severity: 'LOW',
+                title: `Browser-published ${name} under ${published[1]} in ${file.path.split('/').pop()}`,
+                description: `Line ${i + 1} of ${file.path} assigns a ${name} to \`${published[1]}\`, whose prefix tells the build tool to inline the value into the client bundle. It is therefore already public to every visitor, so committing it is not the leak — but a browser key is only as safe as its restrictions. Reported for confirmation rather than as a committed credential.`,
+                filePath: file.path,
+                line: i + 1,
+                suggestion: `Confirm this is a client key and restrict it in the Google Cloud console — by referrer or app, and by API. If a SERVER key was pasted under a public-prefixed name it is already exposed to every visitor: rotate it and move it to a variable the build tool does not publish.`,
+                impactScore: 20,
+                effort: 'low',
+                metadata: { credentialType: name, publishableClientKey: true, publicEnvPrefix: published[1] },
+              }))
+              break
+            }
+          }
           // A credential committed to source is a single token. Internal
           // whitespace means the value is display text — a validation message,
           // an i18n string, a UI label — which nearly every repo has under a
@@ -337,6 +535,7 @@ export const secretsAnalyzer: Analyzer = {
           if (name === 'Generic password assignment') {
             const value = /['"]([^'"]+)['"]/.exec(match[0])?.[1]
             if (value && CONSTANT_IDENTIFIER_VALUE.test(value)) continue
+            if (value && restatesItsKey(line, match.index ?? 0, value)) continue
             if (value && /\s/.test(value)) messageString = true
           }
           if (name === 'Database URL with credentials') {

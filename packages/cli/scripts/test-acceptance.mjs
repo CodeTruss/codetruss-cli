@@ -15,11 +15,13 @@
 // The expected verdicts are taken from the committed adjudication at
 // `docs/benchmarks/cross-tool-2026-08/adjudication/verdicts.md`, sections
 // "CodeTruss reported a parameterized query as CRITICAL SQL injection"
-// (firecrawl `apps/api/src/db/rpc.ts:98`) and "…and the same rule missed a real
-// dynamic query" (uptime-kuma `server/monitor-types/postgres.js:35-63`). The
-// benchmark repositories are deliberately NOT cloned here: minutes of network
-// across nine contexts, and a release that depends on third-party repositories
-// staying alive.
+// (firecrawl `apps/api/src/db/rpc.ts:98`), "…and the same rule missed a real
+// dynamic query" (uptime-kuma `server/monitor-types/postgres.js:35-63`), and
+// sample #18 / "All three of CodeTruss's CRITICAL findings on the corpus are
+// questionable" (excalidraw `.env.development:17` and `.env.production:17`, the
+// publishable Firebase web `apiKey`). The benchmark repositories are NOT cloned
+// here: minutes of network across nine contexts, and a release that depends on
+// third-party repositories staying alive.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -59,6 +61,61 @@ const EXPECTED = [
     why: 'the whole query text is a function parameter on a database-shaped receiver (added in 0.2.53)',
   },
 ]
+
+/**
+ * What the shipped engine must say about each credential-shaped fixture line.
+ *
+ * The `secrets` analyzer is a registry pass, not the SAST pass, so these are
+ * checked against `secrets` findings. Same anchor discipline as {@link EXPECTED}:
+ * the line is located in the fixture text, never written down.
+ *
+ * These four are one truth table, not four independent cases, and the last row
+ * is why the other three are safe. The publishable-client-identifier exemption
+ * must never widen into "a Google API key is never a secret", so the same key
+ * format, in the same committed `.env`, under a name the build tool does not
+ * publish, is asserted to stay CRITICAL right beside them.
+ */
+const EXPECTED_SECRETS = [
+  {
+    path: '.env.production',
+    anchor: 'VITE_APP_FIREBASE_CONFIG',
+    severity: 'INFO',
+    messageIncludes: 'public client identifier',
+    publishableClientKey: true,
+    why: 'a Firebase web config on one JSON line — public by design, was CRITICAL until 0.2.56',
+  },
+  {
+    path: 'src/firebase.ts',
+    anchor: 'apiKey:',
+    severity: 'INFO',
+    messageIncludes: 'public client identifier',
+    publishableClientKey: true,
+    why: 'the same config as an initializeApp({…}) argument, with no environment variable to read — was HIGH until 0.2.56',
+  },
+  {
+    path: '.env.production',
+    anchor: 'VITE_APP_GOOGLE_MAPS_KEY',
+    severity: 'LOW',
+    messageIncludes: 'inline the value into the client bundle',
+    publishableClientKey: true,
+    why: 'a publishable prefix with no Firebase config around it: public to every visitor, so a restriction question rather than a leak',
+  },
+  {
+    path: '.env.production',
+    anchor: 'MAPS_SERVER_KEY',
+    severity: 'CRITICAL',
+    messageIncludes: 'treated as compromised',
+    publishableClientKey: false,
+    why: 'the negative control: the same AIza format under a name the build tool does not publish is a committed credential and must keep firing',
+  },
+]
+
+/**
+ * Fixtures the local SAST parser reads. The rest of the tree exists for the
+ * registry analyzers — a `.env` is not JavaScript — so `filesScanned` is
+ * compared against this subset rather than the whole fixture count.
+ */
+const SAST_READABLE = /\.[cm]?[jt]sx?$/
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -138,8 +195,8 @@ async function materializeFixtures(target) {
   return written
 }
 
-/** Run `review` then `report --json` in `repo`, and return the local-sast findings. */
-function scan(repo, home, fixtureCount) {
+/** Run `review` then `report --json` in `repo`, and return the findings under test. */
+function scan(repo, home, sastFixtureCount) {
   const env = {
     // Keep the run off the developer's (and the runner's) real config: the CLI
     // stores its signing key and verify-trust decisions under the user config
@@ -161,24 +218,30 @@ function scan(repo, home, fixtureCount) {
     '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'acceptance fixture baseline',
   )
-  // PASS=0 and REVIEW_REQUIRED=1 are both valid outcomes; the verdict is not
-  // what is under test, the findings are. FAILED=2 and usage=3 are not.
+  // PASS=0, REVIEW_REQUIRED=1 and FAILED=2 are all valid outcomes; the verdict
+  // is not what is under test, the findings are. FAILED became reachable when
+  // the fixtures gained a deliberately committed credential — the `.env`
+  // negative control below is CRITICAL on purpose, and a tree containing one
+  // SHOULD fail. Usage=3 and any crash still are not valid.
   run(process.execPath, [bundle, 'review', '--task', 'CLI acceptance fixture scan', '--no-verify'], {
     cwd: repo,
     env,
-    exitCodes: [0, 1],
+    exitCodes: [0, 1, 2],
   })
   const report = JSON.parse(run(process.execPath, [bundle, 'report', 'latest', '--json'], { cwd: repo, env }))
   const pass = report.analyzers?.passes?.find((p) => p.id === 'local-sast')
   assert.ok(pass, 'the receipt has no local-sast pass; the security analyzer did not run at all')
-  assert.equal(pass.result.complete, true, 'the local-sast pass did not complete over two small fixtures')
-  assert.equal(pass.result.truncated, false, 'the local-sast pass truncated over two small fixtures')
+  assert.equal(pass.result.complete, true, 'the local-sast pass did not complete over a handful of small fixtures')
+  assert.equal(pass.result.truncated, false, 'the local-sast pass truncated over a handful of small fixtures')
   assert.equal(
     pass.result.metrics?.filesScanned,
-    fixtureCount,
-    `local-sast scanned ${pass.result.metrics?.filesScanned} of ${fixtureCount} fixtures; every fixture must reach the engine`,
+    sastFixtureCount,
+    `local-sast scanned ${pass.result.metrics?.filesScanned} of ${sastFixtureCount} JS-family fixtures; every one must reach the engine`,
   )
-  return pass.result.findings
+  const secrets = report.analyzers?.passes?.find((p) => p.id === 'secrets')
+  assert.ok(secrets, 'the receipt has no secrets pass; the credential analyzer did not run at all')
+  assert.equal(secrets.result.complete, true, 'the secrets pass did not complete over a handful of small fixtures')
+  return { sast: pass.result.findings, secrets: secrets.result.findings }
 }
 
 const version = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8')).version
@@ -191,13 +254,24 @@ await mkdir(home, { recursive: true })
 
 try {
   const fixtures = await materializeFixtures(repo)
-  const findings = scan(repo, home, fixtures.size)
+  const sastFixtures = [...fixtures.keys()].filter((path) => SAST_READABLE.test(path))
+  assert.ok(sastFixtures.length > 0, 'no JS-family fixture remains; the SAST expectations below could not fail')
+  const findings = scan(repo, home, sastFixtures.length)
   const failures = []
+
+  /** The line `anchor` sits on in `path`'s fixture text, 1-based. */
+  const anchorLineIn = (path, anchor) => {
+    const source = fixtures.get(path)
+    assert.ok(source, `an expectation names ${path}, which no fixture produces`)
+    const line = source.split('\n').findIndex((text) => text.includes(anchor)) + 1
+    assert.ok(line > 0, `fixture ${path} no longer contains \`${anchor}\``)
+    return line
+  }
 
   for (const expectation of EXPECTED) {
     const source = fixtures.get(expectation.path)
     assert.ok(source, `EXPECTED names ${expectation.path}, which no fixture produces`)
-    const matched = findings.filter(
+    const matched = findings.sast.filter(
       (f) => f.filePath === expectation.path && f.metadata?.ruleId === expectation.ruleId,
     )
     const describe = (f) => `${f.severity} ${f.metadata?.ruleId} at ${f.filePath}:${f.line} — ${f.title}`
@@ -220,8 +294,7 @@ try {
       continue
     }
     const [finding] = matched
-    const anchorLine = source.split('\n').findIndex((line) => line.includes(expectation.anchor)) + 1
-    assert.ok(anchorLine > 0, `fixture ${expectation.path} no longer contains \`${expectation.anchor}\``)
+    const anchorLine = anchorLineIn(expectation.path, expectation.anchor)
     if (finding.line !== anchorLine) {
       failures.push(`${expectation.path}: ${expectation.ruleId} reported at line ${finding.line}, expected ${anchorLine} (\`${expectation.anchor}\`)`)
     }
@@ -236,6 +309,39 @@ try {
     }
   }
 
+  for (const expectation of EXPECTED_SECRETS) {
+    const anchorLine = anchorLineIn(expectation.path, expectation.anchor)
+    const matched = findings.secrets.filter((f) => f.filePath === expectation.path && f.line === anchorLine)
+    const describe = (f) => `${f.severity} at ${f.filePath}:${f.line} — ${f.title}`
+
+    if (matched.length !== 1) {
+      failures.push(
+        `${expectation.path}:${anchorLine} (\`${expectation.anchor}\`): expected exactly 1 secrets finding `
+        + `(${expectation.why}), got ${matched.length}${matched.length ? `:\n    ${matched.map(describe).join('\n    ')}` : ''}`,
+      )
+      continue
+    }
+    const [finding] = matched
+    if (finding.severity !== expectation.severity) {
+      failures.push(
+        `${expectation.path}:${anchorLine} (\`${expectation.anchor}\`): secrets severity ${finding.severity}, `
+        + `expected ${expectation.severity} — ${expectation.why}`,
+      )
+    }
+    if (Boolean(finding.metadata?.publishableClientKey) !== expectation.publishableClientKey) {
+      failures.push(
+        `${expectation.path}:${anchorLine} (\`${expectation.anchor}\`): secrets metadata.publishableClientKey `
+        + `${JSON.stringify(finding.metadata?.publishableClientKey)}, expected ${expectation.publishableClientKey}`,
+      )
+    }
+    if (!finding.description?.includes(expectation.messageIncludes)) {
+      failures.push(
+        `${expectation.path}:${anchorLine} (\`${expectation.anchor}\`): secrets message does not say `
+        + `\`${expectation.messageIncludes}\`: ${finding.description}`,
+      )
+    }
+  }
+
   if (failures.length > 0) {
     throw new Error(
       `The shipped CLI ${version} does not behave as the benchmark adjudication requires:\n  - `
@@ -247,7 +353,7 @@ try {
 
   process.stdout.write(
     `acceptance: dist/cli.cjs ${version} (newer than ${covered.join(' and ')}) reproduced `
-    + `${EXPECTED.length} adjudicated verdicts over ${fixtures.size} fixtures\n`,
+    + `${EXPECTED.length + EXPECTED_SECRETS.length} adjudicated verdicts over ${fixtures.size} fixtures\n`,
   )
 } finally {
   await rm(scratch, { recursive: true, force: true })

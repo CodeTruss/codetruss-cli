@@ -10,6 +10,11 @@ coverage/
 .env
 .env.*
 !.env.example
+# The CLI acceptance fixtures. `secrets` escalates on a path matching `/\.env/`,
+# so a fixture that reproduces that escalation has to be named like one — and
+# `.env.*` above silently swallowed it, which would have shipped a check that
+# never reached CI. Only this directory is exempt, and it holds fabricated keys.
+!packages/cli/scripts/fixtures/acceptance/.env*.fixture
 *.pem
 *.key
 *.p12

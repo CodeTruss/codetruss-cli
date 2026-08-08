@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { loadSigningKey, requireTrustedSigningKey } from '../src/signing.js'
 import {
   APPROVED_RECEIPT_DIR,
+  MAX_SCOPE_GLOB_BRACE_GROUPS,
+  MAX_SCOPE_GLOB_EXPANSIONS,
+  MAX_SCOPE_GLOB_LENGTH,
   PRODUCTION_SYNC_ORIGIN,
+  boundedScopeGlobs,
   detectVerifyCommands,
   initialize,
   loadConfig,
@@ -161,6 +165,81 @@ describe('initialization', () => {
       config.receipts.dir = APPROVED_RECEIPT_DIR
       expect(() => receiptDir(symlinkRoot, config)).toThrow('must not traverse symbolic links')
     }
+  })
+})
+
+/**
+ * `allow`, `deny` and `exclude` are chosen by the repository under review, and
+ * they are handed to a matcher whose brace expansion is combinatorial in the
+ * pattern. The 7.5 KB glob below aborted CLI 0.2.45 with an out-of-memory that
+ * no `catch` could see, so the bound belongs on the input as well as on the
+ * dependency that expands it.
+ */
+describe('scope glob bounds', () => {
+  const braceBomb = '{a,b}'.repeat(1500)
+
+  it('rejects a brace-bomb glob from the scanned repository instead of expanding it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-glob-bomb-'))
+    await writeFile(join(root, '.codetruss.yml'), `version: 1\nallow:\n  - '${braceBomb}'\n`)
+
+    expect(braceBomb.length).toBe(7500)
+    // A rejection, not a crash: the assertion only completes because the
+    // process survived to produce an error naming the offending pattern.
+    const error = await loadConfig(root).catch((thrown: Error) => thrown)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe(
+      `allow glob is 7500 characters, over the ${MAX_SCOPE_GLOB_LENGTH}-character limit: ${'{a,b}'.repeat(12)}\u2026`,
+    )
+
+    await writeFile(join(root, '.codetruss.yml'), `version: 1\ndeny:\n  - '${braceBomb}'\n`)
+    await expect(loadConfig(root)).rejects.toThrow(/^deny glob is 7500 characters/)
+
+    // `exclude` reaches the same matcher in policy.ts and gets the same bound.
+    await writeFile(join(root, '.codetruss.yml'), `version: 1\nexclude:\n  - '${braceBomb}'\n`)
+    await expect(loadConfig(root)).rejects.toThrow(/^exclude glob is 7500 characters/)
+  })
+
+  it('bounds expansion potential, not only pattern length', () => {
+    // Both fit well inside the length limit and would still hand the matcher
+    // far more patterns than any policy needs.
+    const groups = '{a,b}'.repeat(MAX_SCOPE_GLOB_BRACE_GROUPS + 1)
+    expect(groups.length).toBeLessThan(MAX_SCOPE_GLOB_LENGTH)
+    expect(() => boundedScopeGlobs([groups], 'allow')).toThrow(
+      `allow glob has ${MAX_SCOPE_GLOB_BRACE_GROUPS + 1} brace groups, over the limit of ${MAX_SCOPE_GLOB_BRACE_GROUPS}`,
+    )
+
+    const wide = `src/{1..${MAX_SCOPE_GLOB_EXPANSIONS + 1}}/**`
+    expect(() => boundedScopeGlobs([wide], 'deny')).toThrow(
+      `deny glob expands to more than ${MAX_SCOPE_GLOB_EXPANSIONS} patterns`,
+    )
+  })
+
+  it('leaves ordinary globs alone', async () => {
+    const ordinary = [
+      'src/**',
+      '.env*',
+      'infra/production/**',
+      'packages/{cli,analyzer-engine}/src/**/*.{ts,tsx}',
+      // Nesting and sequences stay legal while they expand to a sane count.
+      'docs/{guide,reference/{api,cli}}/*.md',
+      'fixtures/case-{1..20}.json',
+    ]
+    expect(boundedScopeGlobs(ordinary, 'allow')).toBe(ordinary)
+
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-glob-ordinary-'))
+    await writeFile(
+      join(root, '.codetruss.yml'),
+      `version: 1\nallow:\n${ordinary.map((glob) => `  - '${glob}'\n`).join('')}`,
+    )
+    await expect(loadConfig(root)).resolves.toMatchObject({ allow: ordinary })
+  })
+
+  it('refuses to write an oversized glob at init time', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codetruss-glob-init-'))
+    process.env.CODETRUSS_SIGNING_KEY = join(root, 'signing.pem')
+
+    await expect(initialize(root, false, { allow: [braceBomb] })).rejects.toThrow(/^init allow glob is 7500 characters/)
+    await expect(readFile(join(root, '.codetruss.yml'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
 

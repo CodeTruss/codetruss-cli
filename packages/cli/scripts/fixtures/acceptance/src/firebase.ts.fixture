@@ -1,0 +1,14 @@
+// The same Firebase web config in the form most applications actually write it:
+// an `initializeApp({…})` argument whose sibling keys are each on their own
+// line, so the shape is only visible across the block rather than on the line
+// that carries the key.
+import { initializeApp } from 'firebase/app'
+
+export const app = initializeApp({
+  apiKey: 'AIzaSyC2kP8vN5xRt7HbQ3wLmZ9aJ4eYd6UfGiw',
+  authDomain: 'acceptance-fixture.firebaseapp.com',
+  projectId: 'acceptance-fixture',
+  storageBucket: 'acceptance-fixture.appspot.com',
+  messagingSenderId: '482017365294',
+  appId: '1:482017365294:web:3f8a1c7b2e64d09a5b7c33',
+})

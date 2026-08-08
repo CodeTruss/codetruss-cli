@@ -74,6 +74,87 @@ function assertSafeRepoSync(value: unknown): void {
   )
 }
 
+/**
+ * Scope globs are matched with `minimatch`, whose brace expansion is
+ * combinatorial in the pattern, and `allow`/`deny`/`exclude` arrive from the
+ * scanned repository's `.codetruss.yml` — a file CodeTruss did not write. A
+ * 7.5 KB pattern of repeated `{a,b}` groups ended 0.2.45 in an uncatchable
+ * out-of-memory abort before it could report anything. `brace-expansion` bounds
+ * that now, but the shape recurs with any matcher that is superlinear in its
+ * pattern, so the untrusted side is bounded here as well. Real globs are nowhere
+ * near these limits: the longest in this repository's own policy is under 50
+ * characters with two brace groups.
+ */
+export const MAX_SCOPE_GLOB_LENGTH = 512
+export const MAX_SCOPE_GLOB_BRACE_GROUPS = 16
+export const MAX_SCOPE_GLOB_EXPANSIONS = 1024
+
+/** How many alternatives one brace group contributes: `{a,b}` is 2, `{1..40}` is 40. */
+function braceAlternatives(body: string, commas: number): number {
+  if (commas > 0) return commas + 1
+  // A sequence expression carries no comma and still expands: `{1..9}`, `{a..z}`.
+  const sequence = /^(-?\d+|[a-zA-Z])\.\.(-?\d+|[a-zA-Z])(?:\.\.(-?\d+))?$/.exec(body)
+  if (!sequence) return 1
+  const [, from, to, step] = sequence
+  const ordinal = (part: string) => /^-?\d+$/.test(part) ? Number(part) : part.charCodeAt(0)
+  const stride = Math.abs(Number(step ?? '1')) || 1
+  return Math.floor(Math.abs(ordinal(to!) - ordinal(from!)) / stride) + 1
+}
+
+/**
+ * An upper bound on what brace expansion can produce. Nesting only ever yields
+ * fewer patterns than the product of every group's alternatives, so this
+ * over-counts rather than under-counts. A count that is not a finite number
+ * saturates instead of poisoning the comparison with NaN.
+ */
+function braceBound(glob: string): { groups: number; expansions: number } {
+  const saturate = (value: number) => Number.isFinite(value)
+    ? Math.min(value, MAX_SCOPE_GLOB_EXPANSIONS + 1)
+    : MAX_SCOPE_GLOB_EXPANSIONS + 1
+  const open: { commas: number; bodyStart: number }[] = []
+  let groups = 0
+  let expansions = 1
+  for (let index = 0; index < glob.length; index += 1) {
+    const character = glob[index]
+    // An escaped brace is a literal to minimatch, so it opens no group.
+    if (character === '\\') { index += 1; continue }
+    if (character === '{') { open.push({ commas: 0, bodyStart: index + 1 }); groups += 1; continue }
+    const group = open.at(-1)
+    if (!group) continue
+    if (character === ',') { group.commas += 1; continue }
+    if (character === '}') {
+      open.pop()
+      expansions = saturate(expansions * braceAlternatives(glob.slice(group.bodyStart, index), group.commas))
+    }
+  }
+  return { groups, expansions }
+}
+
+/** Enough of the pattern to find the offending line, without pasting kilobytes into a terminal. */
+function excerpt(glob: string): string {
+  return glob.length > 60 ? `${glob.slice(0, 60)}…` : glob
+}
+
+/**
+ * Reject an oversized scope glob and name it. Truncating the pattern instead
+ * would silently enforce a policy nobody wrote.
+ */
+export function boundedScopeGlobs(globs: string[], name: string): string[] {
+  for (const glob of globs) {
+    if (glob.length > MAX_SCOPE_GLOB_LENGTH) {
+      throw new Error(`${name} glob is ${glob.length} characters, over the ${MAX_SCOPE_GLOB_LENGTH}-character limit: ${excerpt(glob)}`)
+    }
+    const { groups, expansions } = braceBound(glob)
+    if (groups > MAX_SCOPE_GLOB_BRACE_GROUPS) {
+      throw new Error(`${name} glob has ${groups} brace groups, over the limit of ${MAX_SCOPE_GLOB_BRACE_GROUPS}: ${excerpt(glob)}`)
+    }
+    if (expansions > MAX_SCOPE_GLOB_EXPANSIONS) {
+      throw new Error(`${name} glob expands to more than ${MAX_SCOPE_GLOB_EXPANSIONS} patterns: ${excerpt(glob)}`)
+    }
+  }
+  return globs
+}
+
 export async function loadConfig(root: string): Promise<CliConfig> {
   const path = join(root, CONFIG_FILE)
   let raw: unknown
@@ -102,9 +183,9 @@ export async function loadConfig(root: string): Promise<CliConfig> {
   const maxDiffBytes = llm.maxDiffBytes
   return {
     version: 1,
-    allow: list('allow'),
-    deny: list('deny'),
-    exclude: list('exclude'),
+    allow: boundedScopeGlobs(list('allow'), 'allow'),
+    deny: boundedScopeGlobs(list('deny'), 'deny'),
+    exclude: boundedScopeGlobs(list('exclude'), 'exclude'),
     verify: list('verify'),
     receipts: { dir: typeof receipts.dir === 'string' ? receipts.dir : DEFAULT_CONFIG.receipts.dir },
     llm: {
@@ -175,7 +256,7 @@ function initializeGlobs(value: string[] | undefined, name: 'allow' | 'deny'): s
   if (!Array.isArray(value) || value.some((glob) => typeof glob !== 'string' || !glob.trim())) {
     throw new Error(`init ${name} globs must be non-empty strings`)
   }
-  return value.map((glob) => glob.trim())
+  return boundedScopeGlobs(value.map((glob) => glob.trim()), `init ${name}`)
 }
 
 export async function initialize(root: string, force = false, options: InitializeOptions = {}): Promise<string> {

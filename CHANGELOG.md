@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.55 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.55),
+The current public release is [v0.2.57 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.57),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 The npm `latest` tag is still
 [`@codetruss/cli@0.2.50`](https://www.npmjs.com/package/@codetruss/cli/v/0.2.50):
@@ -15,6 +15,174 @@ were superseded before distribution.
 ## Unreleased
 
 No unreleased changes.
+
+## 0.2.57 — 2026-08-08
+
+- **An error-code enum is no longer three leaked passwords.** A value that
+  merely spells out its own key — `IncorrectEmailPassword =
+  "incorrect-email-password"` — carries nothing the identifier beside it did not
+  already carry. That is what an enum member, an error code, or an action
+  constant looks like; a credential is the opposite, a value the key cannot
+  predict. The SCREAMING_SNAKE exemption already covered `UPDATE_PASSWORD =
+  'UPDATE_PASSWORD'`, so a repository writing the same constants in camelCase or
+  kebab-case got HIGH "treat as compromised, rotate immediately" findings over a
+  file of error codes. The exemption is now the RELATION between value and key
+  rather than the shape of the value, which is the whole point: `password =
+  "correct-horse-battery-staple"` is a real passphrase in kebab case and is
+  still reported. It is one-directional — words dropped from the key are fine
+  (`UserMissingPassword = "missing-password"`), words added to it are not,
+  because added words are where entropy would live — and a one-word restatement
+  (`password = "password"`) stays reported, because that is a worthless
+  credential rather than an enum. Gated on recall rather than on examples: 400
+  random secrets across base64 and hex on six credential key names, and 200
+  kebab-case passphrases sharing no word with their key, all still reported.
+  Re-measured on the ten-repository cross-tool corpus before and after: **904
+  findings both ways, nothing removed and nothing added**, every analyzer
+  unchanged. State that for what it is — the corpus proves this narrowing costs
+  no recall there, not that it helps there. The shape it removes does not occur
+  in those ten repositories; it was found by adjudicating a scan of
+  calcom/cal.com, which is not one of them.
+- **Repository-supplied scope globs are bounded before they reach the matcher.**
+  `allow`, `deny` and `exclude` come from the scanned repository's
+  `.codetruss.yml`, and `minimatch`'s brace expansion is combinatorial in the
+  pattern: a 7.5 KB glob of repeated `{a,b}` groups ended 0.2.45 in an
+  out-of-memory abort — exit 134, no verdict, no receipt, nothing a `catch`
+  could see. 0.2.46 fixed that by taking a `brace-expansion` release that bounds
+  its own output, which left the fix living entirely in a dependency, for a
+  matcher shape that recurs. The untrusted input is now bounded too: 512
+  characters, 16 brace groups, and 1,024 potential expansions, checked before
+  any pattern reaches the matcher and applied identically to a typed `--allow`
+  flag. Oversized patterns are rejected by name rather than truncated, because a
+  truncated glob silently enforces a policy nobody wrote. This repository's own
+  longest policy glob is under 50 characters with two brace groups.
+- **`receipt.ts` is four modules instead of one 1,042-line file.** Nothing it
+  does changes. The file had grown to hold three unrelated jobs — rendering the
+  Markdown, keeping receipts on disk, and checking one against its signature —
+  and its own `size` analyzer had been flagging it. It is now
+  `receipt-markdown.ts`, `receipt-store.ts` and `receipt-verify.ts` behind a
+  `receipt.ts` facade that re-exports every name that was exported before; no
+  call site changed. The frozen renderers were the reason to be careful rather
+  than a reason not to move them: their bytes sit inside receipts that are
+  already signed, so each of `local-registry-v1` … `v5` was re-rendered and
+  checked against the SHA-256 its signature covers, and all five are unchanged.
+
+## 0.2.56 — 2026-08-08
+
+Two CRITICAL findings survived 0.2.53 on the cross-tool corpus. Hand adjudication
+judged both wrong. They were the loudest thing this CLI said about anyone's code, and
+what they said was "treat this as compromised" about a value Google publishes on
+purpose.
+
+- **A Firebase web API key is a public client identifier, and we reported it CRITICAL.**
+  `excalidraw/excalidraw` commits a `VITE_APP_FIREBASE_CONFIG` in `.env.development:17`
+  and `.env.production:17`. Each holds a Firebase **web** `apiKey`, which is compiled
+  into the browser bundle by design, which Google documents as an identifier rather than
+  a secret, and which is protected by Security Rules, App Check and per-key restrictions
+  — never by keeping it out of a repository.
+
+  The escalation did not come from the credential type. It came from the **path**: a file
+  matching `/(^|\/)\.env/` reports CRITICAL, so an identifier the framework publishes to
+  every visitor was reported as a leak with "Committed credentials should be treated as
+  compromised" attached. That is not a severity that was slightly too high. It is wrong
+  advice about the class.
+
+  The engine now has a notion of **publishable client identifier**: a credential whose
+  exposure is by design, recognised from the credential TYPE plus its surroundings, never
+  from either alone. Only `Google API key` is eligible today, so no surroundings can
+  downgrade a Stripe live key, a GitHub token or a PEM block. Eligibility alone downgrades
+  nothing either, because a Google key is just as often a server key. Two recognisers sit
+  behind it:
+
+  - **A publishable variable name.** `VITE_`, `NEXT_PUBLIC_`, `REACT_APP_` and `PUBLIC_`
+    are the documented conventions by which Vite, Next.js, Create React App, SvelteKit and
+    Astro inline a value into the client bundle. The prefix is not a hint about intent, it
+    is the build tool's guarantee that the value is already public. Reported **LOW**, as a
+    restriction question: confirm it is a client key and restrict it, and if a server key
+    was pasted under a published name then it is already exposed and must be rotated.
+  - **The Firebase web config object.** `apiKey` bound to Google's `AIza` + 35-character
+    web format, with at least three of `authDomain`, `projectId`, `storageBucket`,
+    `messagingSenderId`, `appId`, `databaseURL`, `measurementId` as object keys within
+    eight lines. This is what catches `initializeApp({ … })` written straight into client
+    source, where there is no environment variable to read. Reported **INFO**.
+
+  What it deliberately does **not** match: a Google API key under any other name; an
+  `apiKey` whose value is not `AIza…`; an `AIza…` key bound to its own name beside a
+  Firebase block; or a Firebase **admin** service account, whose keys are snake_case and
+  whose actual secret is a PEM block the private-key pattern still reports at full
+  severity. Exempting on the key name `apiKey` would have hidden real API keys in every
+  codebase, which is a worse defect than the one this fixes, so the name is one conjunct
+  of three and never sufficient alone.
+
+  **Measured on the ten-repository corpus, not on our own code.** Published 0.2.55 against
+  this build, same pinned commits, same harness
+  (`docs/benchmarks/cross-tool-2026-08/lib/run-codetruss.sh`): **904 findings before, 904
+  after.** Exactly four findings moved, all four in excalidraw — the two CRITICALs became
+  the two INFOs, at the same files and the same lines. Every other repository's count,
+  every other rule's count, and the LOW/MEDIUM/HIGH mix are unchanged. CRITICAL on this
+  corpus goes 2 → 0. All 30 hand-adjudicated findings in
+  `docs/benchmarks/cross-tool-2026-08/adjudication/verdicts.md` were re-checked
+  mechanically: **zero correct findings lost**, and sample #18 moves from CRITICAL to INFO.
+
+  `packages/cli/scripts/test-acceptance.mjs` pins the whole truth table rather than the one
+  case that was wrong — a Firebase config in a published `.env` variable (INFO), the same
+  config as an `initializeApp` argument (INFO), a published variable with no Firebase config
+  around it (LOW), and, in the same committed `.env`, the same key format under a name the
+  build tool does not publish (**CRITICAL**). That last row is the reason the other three
+  are safe, and it fails loudly if the exemption is ever widened into "an `apiKey` is never
+  a secret". Verified in both directions: without this change the check fails with nine
+  differences, with it the four fixtures reproduce six adjudicated verdicts.
+
+- **0.2.55 overstated its own test coverage.** That entry said the acceptance check "runs
+  in all nine compatibility contexts and in the release job". It runs in **six of nine**,
+  and in the release job.
+
+  The mirror's `.github/workflows/ci.yml` gates its `Test` step on
+  `if: matrix.node != '20.9.0'`, so the three Node 20.9 contexts run
+  `test-deterministic-package.mjs` and `test-release-verifier.mjs` and never reach
+  `pnpm test`. Mirror CI run `31269228613`, which gated the 0.2.55 release, records
+  `Test=skipped` on ubuntu, macOS and Windows at Node 20.9.0 and `Test=success` on the
+  other six. The claim was written from the intent of the change and never checked against
+  a run.
+
+  **0.2.55's published bytes are unchanged.** They are tagged, attested and served; the
+  correction ships here, the way 0.2.53's stale README profile id was corrected in 0.2.54.
+
+  We think the honest fix is to make the claim true rather than keep softening it, and the
+  gate does not appear to have a reason that covers this script. It exists because
+  `pnpm test` begins with `vitest run`, and `vite@8` declares
+  `node: ^20.19.0 || >=22.12.0` — which is also why the 20.9 job installs with
+  `--config.engine-strict=false`. `test-acceptance.mjs` is plain Node using only built-ins
+  available since 20.1, and it spawns `dist/cli.cjs`, whose own floor is the 20.9 this
+  package promises. Those contexts already build the artifact and already run the shipped
+  binary through `pnpm test:install`, so the runtime is proven there; what is missing is
+  the behaviour check, on the oldest Node we support, for about 45 seconds. That change
+  belongs to `CodeTruss/codetruss-cli`, which this repository does not contain, so it is a
+  recommendation here and not a diff. It is recorded on `CodeTruss/codetruss-cli#47`.
+
+- **…and it named a `CONTRIBUTING.md` the mirror does not carry.** 0.2.55 said
+  "`CONTRIBUTING.md` now says what mirror CI verifies". That section was added to the
+  **monorepo's** `CONTRIBUTING.md`. The mirror has its own `CONTRIBUTING.md` — a different
+  document, addressed to people filing public issues, which states that outside source
+  changes are not accepted — and a reader of the mirror cannot see the section the entry
+  pointed them at.
+
+  We are not syncing the section across. The mirror's file is authored in the mirror and
+  written for an audience that cannot open a pull request against the build it describes;
+  moving maintainer CI guidance into it would put advice there that nobody there can act
+  on, and nothing in this repository generates that file, so claiming the sync would carry
+  it would be a second false claim. The correction is this entry, and the fact itself is
+  stated here rather than pointed at, because the CHANGELOG is the one document that does
+  reach the mirror and the archive:
+
+  > The nine mirror CI contexts verify packaging — a reproducible archive, a verifier that
+  > rejects tampering, a changelog chain, a README whose profile id matches the code. Six
+  > of them, plus the tag-triggered release job, additionally run
+  > `packages/cli/scripts/test-acceptance.mjs`, which executes the built `dist/cli.cjs`
+  > over committed fixtures and asserts the findings the release must and must not
+  > produce. The rule-level SAST suites live in the monorepo and reach neither.
+
+  The monorepo's `CONTRIBUTING.md` carried the same "all nine contexts" error and is
+  corrected in this change.
 
 ## 0.2.55 — 2026-08-08
 
