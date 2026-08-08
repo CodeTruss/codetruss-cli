@@ -869,7 +869,7 @@ describe('CLI snapshot and delta enforcement', () => {
     expect(receipt.analyzers.delta!.recurring).toBeGreaterThanOrEqual(1)
   }, 20_000)
 
-  it('fails closed and records byte counts when diff evidence is truncated', async () => {
+  it('withholds PASS and records byte counts when diff evidence is truncated', async () => {
     const root = await repository()
     await writeFile(join(root, 'large.txt'), '')
     git(root, 'add', '.')
@@ -877,9 +877,13 @@ describe('CLI snapshot and delta enforcement', () => {
     await writeFile(join(root, 'large.txt'), Buffer.alloc(21 * 1024 * 1024, 65))
 
     const result = runCli(root, ['review', '--task', 'Update the large fixture', '--allow', 'large.txt', '--no-verify'])
-    expect(result.status, result.stderr).toBe(2)
+    // A capture bound is a limit of ours, not a defect in the change: the
+    // analyzers still read the whole final tree, and the bytes we did capture
+    // are exactly what the author wrote. It withholds PASS and says why; it no
+    // longer blocks the commit for a 21 MB file the author legitimately added.
+    expect(result.status, result.stderr).toBe(1)
     const receipt = await latestReceipt(root)
-    expect(receipt.verdict).toBe('FAILED')
+    expect(receipt.verdict).toBe('REVIEW_REQUIRED')
     expect(receipt.diff.truncated).toBe(true)
     expect(receipt.diff.totalBytes).toBeGreaterThan(receipt.diff.bytes)
     expect(receipt.reasons.some((reason) => reason.includes('diff capture retained'))).toBe(true)

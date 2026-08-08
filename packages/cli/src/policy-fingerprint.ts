@@ -19,6 +19,11 @@ export function policyFingerprint(options: ReviewOptions, config: CliConfig): st
     scope: {
       allow: canonicalSet(options.allow),
       deny: canonicalSet(options.deny),
+      // What a repository chose not to have analyzed is part of its policy —
+      // changing it changes what a receipt can claim, so it has to move the
+      // digest. Omitted when empty so a repository that excludes nothing keeps
+      // the fingerprint it had before this key existed.
+      ...(options.exclude.length ? { exclude: canonicalSet(options.exclude) } : {}),
     },
     verification: {
       commandDigests: canonicalSet(options.verify.map(sha256)),

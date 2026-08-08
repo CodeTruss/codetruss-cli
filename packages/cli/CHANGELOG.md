@@ -5,6 +5,73 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.51 — 2026-08-08
+
+- **A file CodeTruss could not parse reported the user's change as FAILED.** On
+  `sindresorhus/ky`, a one-line comment change returned `FAILED`, exit 2, for a
+  reason that named no file: `1 file(s) could not be parsed locally`. The
+  trigger was a `unique symbol` declaration — standard TypeScript since 2018 —
+  in `source/utils/merge.ts`, which the bundled zero-dependency grammar cannot
+  read. Reproduced identically on `honojs/hono` and `colinhacks/zod`. Because
+  `codetruss setup` installs a pre-commit hook, FAILED also blocked the next
+  `git commit`, with uninstalling as the only escape.
+
+  Our inability to read a file is our limitation, not a defect in the change.
+  Every entry that reaches the verdict as an evidence issue is now classified at
+  the point where its cause is still known, rather than by matching on message
+  text at the verdict:
+
+  - **`missing` — no evidence at all — still FAILS.** No required analyzer pass
+    ran; the index did not report coverage. Nothing can be concluded from a run
+    like that in either direction, so the receipt refuses rather than reporting
+    a verdict it has no basis for.
+  - **`partial` — a hole in evidence that otherwise exists — is now
+    `REVIEW_REQUIRED`.** A file the parser could not read, a file too large to
+    load, an unreadable file, the file-walk bound, a wall-clock ceiling, a
+    truncated diff capture. None of these is a statement about the change; each
+    is a limit of this tool. They withhold PASS, are named on the receipt, and
+    exit 1 — which the pre-commit hook allows.
+
+- **Coverage gaps now name their files.** The engine recorded that *n* files
+  could not be parsed and dropped which ones before the receipt was signed. A
+  count with no path is unactionable — a reader is told something in their
+  repository is unreadable and given no way to find it. Parse failures and
+  in-file scan errors are now carried as bounded path lists through the scan
+  diagnostics, disclosed in the pass detail (so they reach the terminal), and
+  recorded in the signed pass metrics alongside `degradedLanguages` (so a later
+  reader recovers them without re-parsing an English sentence).
+
+- **New `exclude` key in `.codetruss.yml`.** Globs listed there keep their files
+  out of the analysis index entirely, so a file this tool cannot read need not
+  sit on every receipt forever. It is an analysis exclusion only: an excluded
+  path is still inventoried as a changed file, still classified against scope,
+  and is named — with its glob and its matched paths — in the receipt's coverage
+  notes. It also enters the policy fingerprint, because what a repository chose
+  not to have analyzed is part of its policy. An exclusion that hid itself would
+  be a worse bug than the coverage gap it works around.
+
+- **One design asset no longer forces REVIEW_REQUIRED forever.** A `logo.ai`
+  committed with a text-ish extension made every change to that repository
+  REVIEW_REQUIRED, permanently, via `apparent text file(s) contained binary
+  data`. That contradicted the same file's own arithmetic: binary-in-text files
+  are already subtracted from the coverage denominator as unanalyzable, so the
+  ratio said nothing was lost while the verdict said coverage was partial. It is
+  now disclosed as a classification note on the receipt and does not gate the
+  verdict.
+
+- **A commented-out regex ran the analyzer phase past seven minutes at 100%
+  CPU.** `colinhacks/zod` never finished a review. The cause was not the parser:
+  the literal-stripping expression shared by the `complexity` and `comment-slop`
+  analyzers spelled its escape handling as `(?:\\.|(?!\1).)*`, which lets a
+  backslash be consumed by either branch. On an unterminated literal the engine
+  then tries every partition of the backslashes in it. `packages/zod/src/v3/
+  types.ts:607` is a commented-out email regex with 133 backslashes and no
+  closing quote: 2^133 on one 928-character line. It outlived both advertised
+  wall-clock ceilings because those bound the SAST pass and this runs in the
+  registry analyzers. Excluding the backslash from the second branch makes the
+  alternatives disjoint; the same line now completes in under a millisecond with
+  byte-identical output, and the fixture is pinned in the test suite.
+
 ## 0.2.50 — 2026-08-08
 
 - **`dead-code` spent 26 of this analysis's 27 seconds and bought nothing with

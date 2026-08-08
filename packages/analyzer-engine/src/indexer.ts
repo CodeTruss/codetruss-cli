@@ -35,6 +35,9 @@ const IGNORED_DIRS = new Set([
 
 const DEFAULT_MAX_FILES = 20_000
 const DEFAULT_MAX_FILE_BYTES = 1_000_000 // skip reading content over 1MB
+/** How many excluded paths the coverage record names. The count stays
+ *  authoritative for the total; this bounds only what gets listed. */
+const MAX_DISCLOSED_EXCLUDED_PATHS = 50
 const TEXT_KINDS = new Set(['source', 'component', 'route', 'test', 'config', 'doc', 'migration'])
 const EXTENDED_BINARY_ASSET_RE = /\.(?:webp|avif|woff2?|ttf|otf|eot|pdf|zip|tar|tgz|gz|bz2|xz|zst|br|lz4|7z|rar|jar|war|ear|apk|deb|rpm|dmg|iso|cab|wasm|bin|exe|dll|so|dylib)$/i
 /** Markup/data languages that must never appear in code LOC stats. */
@@ -47,6 +50,17 @@ export interface IndexWorkingTreeOptions {
    * assets, preventing local release files from becoming incomplete text.
    */
   assetMode?: 'historical' | 'binary-aware'
+  /**
+   * Repository-relative POSIX paths the caller has been told to leave alone.
+   *
+   * A predicate rather than a glob list on purpose: the syntax of an exclusion
+   * is the caller's contract with its user (the CLI answers for `.codetruss.yml`
+   * globs), and the indexer's job is only to honor the answer. An excluded path
+   * never becomes an IndexedFile, so no analyzer can see it; it is counted in
+   * {@link IndexCoverage.excludedFiles} and named in `excludedPaths` so the
+   * exclusion is disclosed rather than silent.
+   */
+  exclude?: (path: string) => boolean
 }
 
 /**
@@ -174,8 +188,19 @@ export async function indexWorkingTree(
   let oversizedTextFiles = 0
   let unreadableTextFiles = 0
   let binaryTextFiles = 0
+  let excludedFiles = 0
+  const excludedPaths: string[] = []
 
   for (const path of paths) {
+    // Before stat, before classification: an excluded path is not evidence of
+    // anything, so it must not reach an analyzer OR move a coverage counter.
+    // It is named below instead, which is the whole difference between an
+    // exclusion and a blind spot.
+    if (options.exclude?.(path)) {
+      excludedFiles++
+      if (excludedPaths.length < MAX_DISCLOSED_EXCLUDED_PATHS) excludedPaths.push(path)
+      continue
+    }
     let size = 0
     try {
       size = (await stat(join(root, path))).size
@@ -287,6 +312,7 @@ export async function indexWorkingTree(
       oversizedTextFiles,
       unreadableTextFiles,
       binaryTextFiles,
+      ...(excludedFiles ? { excludedFiles, excludedPaths } : {}),
     },
   }
 }

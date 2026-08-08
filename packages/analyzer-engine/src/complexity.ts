@@ -5,7 +5,7 @@ import {
   type Analyzer,
   type AnalyzerFinding,
 } from './types'
-import { looksGenerated } from './support'
+import { looksGenerated, stripStringLiterals } from './support'
 
 const MAX_NESTING = 5
 const LONG_FUNCTION_LINES = 120
@@ -64,7 +64,7 @@ export const complexityAnalyzer: Analyzer = {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
         // strip strings & comments crudely to avoid counting braces in them
-        const code = line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '""').replace(/\/\/.*$/, '')
+        const code = stripStringLiterals(line, '""').replace(/\/\/.*$/, '')
 
         const isFuncDecl = /\b(function\b|=>\s*{|def |func |fn )/.test(code)
         if (isFuncDecl && funcStart === -1) {
