@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { assertChangelogPolicy } from './changelog-policy.mjs'
+import { assertDocsProfilePolicy, readDerivedProfileFacts } from './docs-profile-policy.mjs'
 import { buildDeterministicPackageArchive } from './deterministic-package.mjs'
 import { assertReleasePackagePolicy } from './release-package-policy.mjs'
 import { buildReleaseManifest, serialiseReleaseManifest } from './release-metadata.mjs'
@@ -26,6 +27,18 @@ try {
   const pkg = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'))
   assertReleasePackagePolicy(pkg)
   assertChangelogPolicy(await readFile(join(packageDir, 'CHANGELOG.md'), 'utf8'), pkg.version)
+  // The README ships in the archive beside the CHANGELOG, and it restates the
+  // analysis profile id and the analyzer count in prose. Both have gone stale
+  // into a published release. Check them here, before any bytes exist: this
+  // script refuses to overwrite an already-written versioned tarball, so a
+  // check that ran later would cost a version number to act on.
+  assertDocsProfilePolicy(
+    [{ path: 'packages/cli/README.md', text: await readFile(join(packageDir, 'README.md'), 'utf8') }],
+    readDerivedProfileFacts(
+      await readFile(join(packageDir, 'src', 'types.ts'), 'utf8'),
+      await readFile(join(repoRoot, 'packages', 'analyzer-engine', 'src', 'registry.ts'), 'utf8'),
+    ),
+  )
   // Invoke the build through Node directly. Package-manager shims are `.cmd`
   // files on Windows and cannot be spawned by Node without a shell; the build
   // itself is already a portable Node script and needs no shell mediation.

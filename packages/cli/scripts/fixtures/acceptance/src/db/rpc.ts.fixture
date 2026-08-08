@@ -1,0 +1,14 @@
+// Shape of firecrawl/firecrawl `apps/api/src/db/rpc.ts:98`, the CWE-89 CRITICAL
+// false positive recorded in docs/benchmarks/cross-tool-2026-08/adjudication/
+// verdicts.md ("CodeTruss reported a parameterized query as CRITICAL SQL
+// injection"). Interpolations inside drizzle's `sql` tag become bound
+// parameters; nothing is concatenated. Fixed in CLI 0.2.53. MUST NOT be
+// reported as sql-injection.
+import { sql } from "drizzle-orm";
+import { db } from "./client";
+
+export async function changeTrackingInsertScrape(params) {
+  await db.execute(
+    sql`select change_tracking_insert_scrape(p_team_id => ${params.team_id}, p_url => ${params.url})`,
+  );
+}

@@ -1,0 +1,24 @@
+// Shape of louislam/uptime-kuma `server/monitor-types/postgres.js:35-63`, the
+// true positive recorded in docs/benchmarks/cross-tool-2026-08/adjudication/
+// verdicts.md ("...and the same rule missed a real dynamic query"). Semgrep
+// flagged it as node-postgres-sqli; CodeTruss reported nothing in that file
+// until CLI 0.2.53. The whole query text arrives as a parameter, the receiver
+// is database-shaped, and no call site in this file binds a constant or a
+// tagged template to it. MUST be reported as sql-injection.
+class PostgresMonitorType extends MonitorType {
+  async check(monitor, heartbeat) {
+    let query = monitor.databaseQuery;
+    await this.postgresQuery(monitor.databaseConnectionString, query);
+  }
+
+  async postgresQuery(connectionString, query) {
+    return new Promise((resolve, reject) => {
+      const client = new Client(postgresConParse(connectionString));
+      client.connect((err) => {
+        client.query(query, (err2, res) => {
+          resolve(res);
+        });
+      });
+    });
+  }
+}
