@@ -325,9 +325,13 @@ pnpm validate
 ```
 
 `pnpm validate` typechecks, builds the deterministic release, runs the source and
-adversarial release tests, verifies the result byte-for-byte against the exact
-published website artifact recorded in `release-reference.json`, and exercises a
-clean global install.
+adversarial release tests, verifies the rebuilt artifact byte-for-byte against the
+packed archive, and exercises a clean global install. Note that this checks the
+build against itself: it proves the release is reproducible from this source, not
+that it matches a digest pinned elsewhere. `release-reference.json` records the
+published digests but nothing reads it, so it is documentation rather than a
+control. To check a release against an independent record, use the attestation
+below.
 
 Verify a downloaded release yourself:
 
