@@ -19,7 +19,7 @@ account, npm token, package access, or npm environment approval.
 4. Verify the downloaded archive independently:
 
    ```bash
-   gh attestation verify codetruss-cli-0.2.30.tgz --repo DeliriumPulse/codetruss-cli
+   gh attestation verify codetruss-cli-0.2.30.tgz --repo CodeTruss/codetruss-cli
    shasum -a 256 -c codetruss-cli-0.2.30.tgz.sha256
    ```
 
@@ -38,7 +38,7 @@ publication:
    permits only protected branches. The workflow itself also requires a
    `refs/heads/main` dispatch.
 2. Confirm npm package settings name the GitHub Actions trusted publisher with:
-   organization or user `DeliriumPulse`, repository `codetruss-cli`, workflow
+   organization or user `CodeTruss`, repository `codetruss-cli`, workflow
    filename `publish-npm.yml`, environment `npm`, and allowed action
    `npm publish`. Publishing access must remain `mfa=publish`, which requires
    2FA and disallows conventional publish tokens while permitting the trusted
