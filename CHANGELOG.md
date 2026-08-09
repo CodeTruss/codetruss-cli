@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.61 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.61),
+The current public release is [v0.2.62 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.62),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 npm publication is a separate, manually dispatched step, so the npm `latest`
 tag can trail the website and the GitHub release; the dispatch for this
@@ -12,6 +12,32 @@ Entries explicitly marked `(unpublished)` are retained release candidates that
 were superseded before distribution.
 
 ## Unreleased
+
+## 0.2.62 — 2026-08-09
+
+- **The comment analyzer learned the difference between deferring with a
+  placeholder and documenting one.** A bare match on the word reported this
+  engine's own docs for its placeholder detector as six comments describing
+  unfinished work — the same self-reference failure the secrets scanner had
+  with its own examples, fixed the same way. Backtick code spans are stripped
+  before narration matching (a quoted term is vocabulary under discussion),
+  and the placeholder pattern now requires the deferral sense: "is a
+  placeholder", "placeholder for", "placeholder until".
+
+  Measured on six outside repositories before shipping: thirteen findings
+  moved, and each was read. Eleven were prose about placeholder machinery —
+  redaction engines, template resolvers, detection logic — reported as
+  unfinished work, which is precisely the false positive this closes. Two
+  were stub files literally titled "Placeholder … example" that no longer
+  report; that loss is accepted and recorded here rather than patched with a
+  pattern that would re-open the other eleven.
+
+- **Three dead exports are gone**: `CLI_SAST_LANGUAGES` and
+  `CLI_SAST_LANGUAGE_NAMES` from the local profile, and the `TaintFlow`
+  interface. All three had zero consumers anywhere — found by this
+  repository's own audit after the graph resolver learned to see
+  workspace-package imports, which cleared the ten false "unused export"
+  findings and left these three real ones.
 
 ## 0.2.61 — 2026-08-08
 

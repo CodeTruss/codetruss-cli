@@ -142,7 +142,12 @@ const NARRATION_TAGS = [
     patterns: [
       /\bin a real (?:app|application|implementation|system|world)\b/i,
       /\bfor now,/i,
-      /\bplaceholder\b/i,
+      // The deferral SENSE only: "this is a placeholder", "placeholder for X",
+      // "placeholder until". A bare \bplaceholder\b also matched prose ABOUT
+      // placeholder machinery — this engine's own docs for its placeholder
+      // detector were reported as six comments describing unfinished work.
+      /\b(?:is|as|just|a)\s+placeholders?\b/i,
+      /\bplaceholders?\s+(?:for|until|value)\b/i,
       /\bmock(?:ed)? (?:data|implementation)\b/i,
       /\bimplement(?: this)? later\b/i,
       /\byou (?:would|should|may) want to\b/i,
@@ -242,7 +247,10 @@ function opensSentence(lines: ClassifiedLine[], index: number): boolean {
 function narrationHit(lines: ClassifiedLine[], raw: string, index: number): NarrationHit | null {
   const line = lines[index]
   if (line.kind === 'code' || line.kind === 'blank') return null
-  const text = line.text
+  // Backtick code spans quote vocabulary; a term under discussion is not the
+  // narration the term describes. Without this, docs ABOUT the placeholder
+  // machinery matched the placeholder-deferral patterns.
+  const text = line.text.replace(/`[^`]*`/g, '')
   if (!text || DIRECTIVE.test(text)) return null
   const sentenceStart = opensSentence(lines, index)
   for (const family of NARRATION_TAGS) {

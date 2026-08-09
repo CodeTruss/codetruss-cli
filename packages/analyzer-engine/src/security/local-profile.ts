@@ -1,4 +1,3 @@
-import type { SastLanguage } from './lang'
 
 /**
  * What the CLI's local SAST pass is allowed to report.
@@ -36,16 +35,6 @@ export const CLI_SAST_RULE_IDS: ReadonlySet<string> = new Set([
   'open-record-write',
   'sql-injection',
 ])
-
-/** Languages the CLI's zero-dependency parser covers. */
-export const CLI_SAST_LANGUAGES: ReadonlySet<SastLanguage> = new Set<SastLanguage>([
-  'javascript',
-  'typescript',
-  'tsx',
-])
-
-/** Display names of {@link CLI_SAST_LANGUAGES}, matching the indexer's labels. */
-export const CLI_SAST_LANGUAGE_NAMES: ReadonlySet<string> = new Set(['TypeScript', 'JavaScript'])
 
 /**
  * Classes the local pass STILL does not check, named so a receipt can say so.
