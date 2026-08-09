@@ -3,7 +3,7 @@
 CodeTruss CLI follows semantic versioning. Release artifacts and their SHA-256
 checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 
-The current public release is [v0.2.62 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.62),
+The current public release is [v0.2.63 on GitHub](https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.63),
 distributed from <https://codetruss.com/downloads/codetruss-cli-latest.json>.
 npm publication is a separate, manually dispatched step, so the npm `latest`
 tag can trail the website and the GitHub release; the dispatch for this
@@ -12,6 +12,18 @@ Entries explicitly marked `(unpublished)` are retained release candidates that
 were superseded before distribution.
 
 ## Unreleased
+
+## 0.2.63 — 2026-08-09
+
+- **`codetruss sync` no longer relabels who produced a receipt.** The sync
+  envelope used to overwrite the receipt's signing identity with whatever key
+  ran the sync, so a teammate exporting your receipt made the hosted record
+  claim they signed it. The producer's public key and fingerprint now travel
+  unchanged, and the exporting key is named separately in
+  `evidence.exporter`; the envelope signature stays the exporter's. The
+  hosted side pins API credentials to the exporting key (the machine actually
+  syncing) and displays the producer as the signer, with the exporter shown
+  when the two differ.
 
 ## 0.2.62 — 2026-08-09
 
