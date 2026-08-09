@@ -183,10 +183,17 @@ export async function createSyncEnvelope(receipt: Receipt): Promise<SyncEnvelope
     else delete synced.analyzers.rejectedSuppressions
   }
   synced.verifications = synced.verifications.map((item) => ({ ...item, command: '[redacted for sync]', output: '' }))
+  // The producer's signing identity stays exactly as the receipt recorded it;
+  // the exporting key signs the envelope and is named separately. Overwriting
+  // the producer fields here (the old behavior) relabeled a teammate's receipt
+  // as whoever ran `codetruss sync`.
+  const producer = receipt.evidence.publicKey && receipt.evidence.keyFingerprint
+    ? { publicKey: receipt.evidence.publicKey, keyFingerprint: receipt.evidence.keyFingerprint }
+    : { publicKey: key.publicKey, keyFingerprint: key.fingerprint }
   synced.evidence = {
     patchSha256: receipt.evidence.patchSha256,
-    publicKey: key.publicKey,
-    keyFingerprint: key.fingerprint,
+    ...producer,
+    exporter: { publicKey: key.publicKey, keyFingerprint: key.fingerprint },
   }
   synced.coverageNotes = [
     ...synced.coverageNotes,

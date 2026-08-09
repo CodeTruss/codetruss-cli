@@ -5,6 +5,18 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.63 — 2026-08-09
+
+- **`codetruss sync` no longer relabels who produced a receipt.** The sync
+  envelope used to overwrite the receipt's signing identity with whatever key
+  ran the sync, so a teammate exporting your receipt made the hosted record
+  claim they signed it. The producer's public key and fingerprint now travel
+  unchanged, and the exporting key is named separately in
+  `evidence.exporter`; the envelope signature stays the exporter's. The
+  hosted side pins API credentials to the exporting key (the machine actually
+  syncing) and displays the producer as the signer, with the exporter shown
+  when the two differ.
+
 ## 0.2.62 — 2026-08-09
 
 - **The comment analyzer learned the difference between deferring with a

@@ -250,7 +250,10 @@ export interface Receipt {
   coverageNotes: string[]
   verdict: Verdict
   reasons: string[]
-  evidence: { markdownSha256?: string; patchFile?: string; patchSha256?: string; signatureFile?: string; publicKey?: string; keyFingerprint?: string }
+  /** `exporter` appears only on hosted-sync copies: the key that signed the
+   * sync envelope, kept separate so exporting a teammate's receipt can never
+   * relabel who produced it (`publicKey`/`keyFingerprint` stay the producer's). */
+  evidence: { markdownSha256?: string; patchFile?: string; patchSha256?: string; signatureFile?: string; publicKey?: string; keyFingerprint?: string; exporter?: { publicKey: string; keyFingerprint: string } }
 }
 
 export interface ReviewOptions {

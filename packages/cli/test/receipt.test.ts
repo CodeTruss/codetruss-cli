@@ -615,8 +615,10 @@ describe('signed receipts', () => {
       suggestion: 'Extract [redacted unrelated path] and src/changed.ts into one module.',
       filePath: 'src/changed.ts', line: 3, impactScore: 55, effort: 'medium',
     }])
-    expect(Object.keys(synced.evidence).sort()).toEqual(['keyFingerprint', 'patchSha256', 'publicKey'])
-    expect(verifyBytes(envelope.signedReceipt, synced.evidence.publicKey!, envelope.signature)).toBe(true)
+    expect(Object.keys(synced.evidence).sort()).toEqual(['exporter', 'keyFingerprint', 'patchSha256', 'publicKey'])
+    // The envelope is signed by the exporting key, named separately so the
+    // producer identity fields cannot be relabeled by whoever runs the sync.
+    expect(verifyBytes(envelope.signedReceipt, synced.evidence.exporter!.publicKey, envelope.signature)).toBe(true)
     expect(envelope.signedReceipt).not.toContain('secret prompt')
     expect(envelope.signedReceipt).not.toContain('sensitive output')
     expect(envelope.signedReceipt).not.toContain('"command": "test"')
