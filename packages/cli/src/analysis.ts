@@ -456,10 +456,27 @@ export function computeVerdict(input: {
   // Scope reached by inference is in scope, but it is not scope the repository
   // approved. Saying "all files are within approved scope" over it would be the
   // one wrong sentence on an otherwise honest receipt.
+  // When NOTHING was approved, leading with "0 changed file(s) are within
+  // approved scope" reads as "nothing was checked" — and that is the first line
+  // CodeTruss ever prints in a repository with no `.codetruss.yml`, which is
+  // every repository the first time. Found by installing the published tarball
+  // and running `review --staged` on axios as a new user would: a correct PASS,
+  // over a real finding, announced as if it had inspected nothing.
+  //
+  // The replacement leads with the count actually in scope and still refuses to
+  // call inferred scope approved. It says "none matched an approved allow root"
+  // rather than "this repository approves nothing", because approved can be
+  // zero either way — a repository with allow roots none of the changed files
+  // happened to match is not a repository without any.
   else if (!denied.length && !unexpected.length) {
-    notes.push(inferred.length
-      ? `${input.files.length - inferred.length} changed file(s) are within approved scope; ${inferred.length} more matched scope inferred from this turn and disclosed on the receipt`
-      : `all ${input.files.length} changed file(s) are within approved scope`)
+    const approved = input.files.length - inferred.length
+    notes.push(
+      !inferred.length
+        ? `all ${input.files.length} changed file(s) are within approved scope`
+        : approved > 0
+          ? `${approved} changed file(s) are within approved scope; ${inferred.length} more matched scope inferred from this turn and disclosed on the receipt`
+          : `${inferred.length} changed file(s) matched scope inferred from this turn and disclosed on the receipt; none matched an approved allow root`,
+    )
   }
   if (failed.length) return { verdict: 'FAILED', reasons: [...failed, ...review] }
   if (review.length) return { verdict: 'REVIEW_REQUIRED', reasons: review }

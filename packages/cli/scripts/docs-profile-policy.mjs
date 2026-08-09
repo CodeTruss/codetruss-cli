@@ -27,8 +27,19 @@ const REGISTRY_ENTRY = /^\s*([A-Za-z][\w]*),\s*$/gm
 
 /** Every `local-registry-vN` written down in prose. */
 const PROFILE_ID_CLAIM = /local-registry-v\d+/g
-/** `15-pass`, `15 registry analyzers`, `15 deterministic registry analyzers`, `15-analyzer`. */
-const ANALYZER_COUNT_CLAIM = /\b(\d+)[- ](?:pass(?:es)?|(?:deterministic )?(?:registry |local )?analyzers?)\b/gi
+/**
+ * `15-pass`, `15 registry analyzers`, `15 deterministic registry analyzers`,
+ * `15-analyzer`.
+ *
+ * The leading lookbehind is what makes this safe to point at the whole
+ * repository. `\b` alone starts a match mid-number, so `48,692 analyzer-counted
+ * LOC` in a blog post read as a claim of "692 analyzers" and `a pre-0.2.40 pass`
+ * in a test name read as "40 passes". Both are real text in this repo, and both
+ * would have fired the moment coverage widened — which is how a guard gets
+ * called noisy and switched off.
+ */
+const ANALYZER_COUNT_CLAIM =
+  /(?<![\d.,])(\d+)[- ](?:pass(?:es)?|(?:deterministic )?(?:registry |local )?analyzers?)\b/gi
 
 function lineOf(text, index) {
   return text.slice(0, index).split('\n').length
