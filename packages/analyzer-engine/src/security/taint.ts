@@ -430,14 +430,6 @@ function evalOrigins(node: SyntaxNode, env: Env, depth = 0): Origins {
 
 // ---- function-level analysis ----------------------------------------------
 
-export interface TaintFlow {
-  sourceKind: string
-  sourceNode: SyntaxNode
-  interprocedural: boolean
-  /** Intermediate variable names the value passed through, in order. */
-  via: string[]
-}
-
 /** Which param indexes of a function reach a sink (for the interprocedural hop). */
 export interface FnSummary {
   name: string
