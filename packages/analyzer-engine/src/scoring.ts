@@ -140,7 +140,15 @@ function deduct(findings: AnalyzerFinding[], categories: string[], totalLoc: num
 const NEUTRAL_SCORE = 50
 
 /** Deterministic 0-100 scores derived from findings + repo shape. */
-export function computeScores(index: RepoIndex, findings: AnalyzerFinding[]): Scores {
+export function computeScores(index: RepoIndex, allFindings: AnalyzerFinding[]): Scores {
+  // A finding a developer dismissed with a reasoned `codetruss-ignore` marker
+  // stays on every report as evidence — but it stops scoring, for the same
+  // reason it already stops gating the CLI verdict: that is what dismissing it
+  // is for. Charging for it anyway scored this product's own repository 32 on
+  // Security over its own annotated acceptance fixtures — planted, reasoned,
+  // and disclosed on every receipt, yet priced like leaks. Markers without a
+  // reason never applied in the first place (suppression.ts) and still charge.
+  const findings = allFindings.filter((f) => !f.suppression?.applied)
   const loc = index.totalLoc
   const debt = deduct(findings, ['TECH_DEBT', 'DUPLICATION', 'DEAD_CODE'], loc)
   let security = deduct(findings, ['SECURITY_HYGIENE', 'DEPENDENCY'], loc)

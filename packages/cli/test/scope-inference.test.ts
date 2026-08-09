@@ -297,9 +297,42 @@ describe('inferred scope on the verdict', () => {
 
     expect(outcome.verdict).toBe('PASS')
     expect(outcome.reasons.join('\n')).not.toContain('outside approved scope')
+    // Leads with the count in scope, not with a zero. "0 changed file(s) are
+    // within approved scope" was true and read as "nothing was checked".
     expect(outcome.reasons).toContain(
-      '0 changed file(s) are within approved scope; 2 more matched scope inferred from this turn and disclosed on the receipt',
+      '2 changed file(s) matched scope inferred from this turn and disclosed on the receipt; none matched an approved allow root',
     )
+    // The property this test has always been about: inferred scope is in scope,
+    // and is still never called approved.
+    expect(outcome.reasons.join('\n')).not.toContain('within approved scope')
+  })
+
+  it('never opens with a zero on a repository that has no allow roots at all', () => {
+    // The first line CodeTruss prints in a repository with no `.codetruss.yml`,
+    // which is every repository the first time someone runs it. Found by
+    // installing the published tarball and running `review --staged` on axios.
+    const { files } = resolve('Add a debugOrigin helper', turn(['lib/helpers/isURLSameOrigin.js'], []), [])
+
+    const outcome = verdictFor(files)
+
+    expect(outcome.verdict).toBe('PASS')
+    expect(outcome.reasons).toContain(
+      '1 changed file(s) matched scope inferred from this turn and disclosed on the receipt; none matched an approved allow root',
+    )
+    expect(outcome.reasons.join('\n')).not.toMatch(/\b0 changed file\(s\)/)
+  })
+
+  it('still counts the approved ones separately when some were approved', () => {
+    // The mixed case has to keep reporting both numbers: one file inside the
+    // repository's own allow root, one reached only by inference.
+    const allow = ['lib/**']
+    const { files } = resolve(
+      'Add password reset',
+      turn(['lib/util.ts', 'src/auth/reset.ts', 'src/auth/tokens.ts'], allow),
+      allow,
+    )
+
+    expect(verdictFor(files).reasons.join('\n')).toContain('1 changed file(s) are within approved scope; 2 more')
   })
 
   it('still requires review for the file inference refused to cover', () => {

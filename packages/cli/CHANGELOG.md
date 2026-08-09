@@ -5,6 +5,88 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.61 — 2026-08-08
+
+- **Two path-traversal findings on the hook-result writer are dismissed with
+  their reason, in the code.** The flagged lines build a temp path from
+  `request.path` and open it — after that value has passed three containment
+  gates: the absolute-and-normalized check, lexical containment inside the
+  turn directory, and the deterministic attempt-location assertion. The rule
+  flagged the code that implements the containment, and the dismissal now
+  travels with the code as a reasoned `codetruss-ignore` marker, priced at
+  zero by scoring and shown on every receipt with the explanation above. No
+  behavior changes in this release; the two markers are its only code change.
+
+## 0.2.60 — 2026-08-08
+
+- **A dismissed finding no longer charges the score.** A finding carrying a
+  reasoned `codetruss-ignore` marker already stays on every receipt as
+  evidence and already stops gating the verdict — that is what dismissing it
+  is for. But `computeScores` still priced it like a live finding, which
+  scored this product's own repository 32 on Security over its own annotated
+  acceptance fixtures: planted credentials that exist to prove the analyzers
+  fire, each disclosed with its reason on every receipt, all charged as leaks.
+
+  Scoring now applies the same principle the verdict has applied since the
+  suppression mechanism was hardened: dismissed findings are evidence, not
+  charges. A marker without a reason never applied in the first place and
+  still charges; the identical finding without a marker still charges. Both
+  are pinned by tests, and removing the filter fails them.
+
+## 0.2.59 — 2026-08-08
+
+- **The first line CodeTruss prints no longer opens with a zero.** In a
+  repository with no `.codetruss.yml` — which is every repository the first time
+  someone runs it — a passing review reported `0 changed file(s) are within
+  approved scope; 1 more matched scope inferred from this turn`. Every word of
+  that is true. It also reads as "nothing was checked", which is the opposite of
+  what happened: the file was in scope, it was analysed, and a finding was
+  reported against it.
+
+  It now leads with the count actually in scope: `1 changed file(s) matched
+  scope inferred from this turn and disclosed on the receipt; none matched an
+  approved allow root`. The distinction the old sentence existed to protect is
+  kept — scope reached by inference is still never called approved scope, and
+  the receipt still lists every inferred root with the evidence it came from.
+  The wording says "none matched an approved allow root" rather than "this
+  repository approves nothing", because a repository whose allow roots simply
+  did not match these files is not a repository without any.
+
+  Found by installing the published tarball into a clean prefix and running
+  `codetruss review --staged` on `axios/axios` as a new user would, rather than
+  by reading the code.
+
+## 0.2.58 — 2026-08-08
+
+- **Prose describing a credential pattern is no longer reported as a leak.**
+  This scanner was run over its own source and reported three of its own doc
+  comments: the note explaining why `password = "password"` stays reported, and
+  two citing the fabricated key used to explain how typed-not-generated values
+  are recognized. 0.2.57 failed its own commit gate on the first of them, which
+  is the clearest possible statement of the problem — the comment documenting a
+  rule tripped the rule it documents. Any project that writes about credential
+  handling hits this: a security policy quoting the shape it forbids, a README
+  showing what not to commit, a lint rule explaining its own pattern.
+
+  A code span on a comment line is the shape, but it is deliberately NOT the
+  exemption, because backticks would otherwise be a place to hide a live key.
+  The value also has to be independently provable as not-a-credential, by one of
+  two anchors that already existed here and were already measured: the value
+  spells out its own key, so it carries no entropy the key did not already
+  carry; or its body was typed rather than generated, eight consecutive stepping
+  characters, a threshold 20,000 random bodies fail to reach. A genuinely random
+  value quoted in a comment satisfies neither and is still reported, as is a
+  commented-out assignment holding a real key — that has no code span — and the
+  same fabricated body in executable code, which is not prose.
+
+  The skip is announced rather than silent, at INFO, exactly as a
+  credential-shaped placeholder already is. A secret scanner that quietly drops
+  lines is indistinguishable from one that never read them.
+
+  Measured before shipping on the adjudicated cross-tool corpus plus six more
+  repositories — about 26,000 files, 235 findings — where nothing changed at
+  all. The only findings this moves are the three in our own source.
+
 ## 0.2.57 — 2026-08-08
 
 - **An error-code enum is no longer three leaked passwords.** A value that

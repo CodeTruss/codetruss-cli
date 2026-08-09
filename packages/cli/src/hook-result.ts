@@ -135,7 +135,9 @@ export async function writeInternalHookResult(
   const temporary = `${request.path}.${process.pid}.${randomUUID()}.tmp`
   let handle: Awaited<ReturnType<typeof open>> | undefined
   try {
+    // codetruss-ignore: verified 2026-08-08: request.path passed three containment gates above (absolute+normalized, lexical containment, deterministic attempt location) — this IS the containment implementation
     handle = await open(temporary, 'wx', 0o600)
+    // codetruss-ignore: verified 2026-08-08: same containment-implementation site as the line above
     await handle.writeFile(value, 'utf8')
     await handle.sync()
     await handle.close()

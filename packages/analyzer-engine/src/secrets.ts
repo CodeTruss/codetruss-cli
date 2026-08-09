@@ -292,6 +292,54 @@ function restatesItsKey(line: string, matchIndex: number, value: string): boolea
   return valueWords.length >= 2 && isWordRun(valueWords, identifierWords(assignedKey(line, matchIndex)))
 }
 
+/**
+ * Prose quoting a credential pattern in order to describe it, rather than an
+ * assignment that sets one.
+ *
+ * This scanner was run over its own source and reported three of its own
+ * doc comments: the note on restatesItsKey, which quotes `password =
+ * "password"` to explain why that shape stays reported, and two that cite
+ * `AKIA1234567890ABCDEF` while explaining how fabricated keys are recognized.
+ * CLI 0.2.57 failed its own gate on the first of them.
+ *
+ * A code span on a comment line is the shape, but it is NOT the exemption —
+ * backticks alone would be a place to hide a live key. The exemption is that
+ * the value is independently provable as not-a-credential, by one of two
+ * anchors that already exist here and are already measured:
+ *
+ *  - {@link hasSyntheticSequence}: the body was typed, not generated. Eight
+ *    consecutive stepping characters; 20,000 random bodies produce zero hits.
+ *  - The one-word restatement from {@link restatesItsKey}: the value spells
+ *    out its own key, so it carries no entropy the key did not already carry.
+ *
+ * Every other half stays reported, and each closes a different hole. A
+ * commented-out assignment holding a real key (`// const apiKey =
+ * "sk-live-…"`) has no code span. A template literal in executable code is not
+ * on a comment line. A genuinely random value quoted in a comment satisfies
+ * neither anchor.
+ *
+ * Comment detection is deliberately the unambiguous prefix only. Tracking open
+ * block comments across lines would let a stray `/*` inside a string silence
+ * every line after it, and a wrong answer here hides a credential.
+ */
+function documentsAnExample(line: string, match: RegExpMatchArray, subject: string | null): boolean {
+  const matchIndex = match.index ?? 0
+  const trimmed = line.trimStart()
+  if (!trimmed.startsWith('*') && !trimmed.startsWith('//') && !trimmed.startsWith('#')) return false
+
+  // Odd backtick count before the match means it opened inside a span; a
+  // closing backtick after it means the span encloses the match.
+  const openedBefore = (line.slice(0, matchIndex).match(/`/g) ?? []).length % 2 === 1
+  if (!openedBefore || !line.slice(matchIndex + match[0].length).includes('`')) return false
+
+  if (subject !== null && hasSyntheticSequence(subject)) return true
+
+  const quoted = /['"]([^'"]+)['"]/.exec(match[0])?.[1]
+  if (quoted === undefined) return false
+  const valueWords = identifierWords(quoted)
+  return valueWords.length === 1 && isWordRun(valueWords, identifierWords(assignedKey(line, matchIndex)))
+}
+
 /** Dev/CI dummy hosts — credentials pointing here are not real secrets. */
 const DUMMY_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', 'host.docker.internal'])
 
@@ -486,6 +534,24 @@ export const secretsAnalyzer: Analyzer = {
               impactScore: 5,
               effort: 'low',
               metadata: { credentialType: name, placeholder: true },
+            }))
+            break
+          }
+          // Announced rather than silent, for the same reason the placeholder
+          // skip above is: a secret scanner that quietly drops lines is
+          // indistinguishable from one that never read them.
+          if (documentsAnExample(line, match, subject)) {
+            report(() => ({
+              category: 'SECURITY_HYGIENE',
+              severity: 'INFO',
+              title: `Documented ${name} example ignored in ${file.path.split('/').pop()}`,
+              description: `Line ${i + 1} of ${file.path} matches a ${name} pattern inside a code span on a comment line, and the value is provably not a credential — it either spells out its own key or was typed rather than generated. It is NOT reported as a leak. Shown only to confirm the scanner read this line.`,
+              filePath: file.path,
+              line: i + 1,
+              suggestion: 'No action needed. A random value in the same position, or the same value outside a comment, would be reported.',
+              impactScore: 5,
+              effort: 'low',
+              metadata: { credentialType: name, documentedExample: true },
             }))
             break
           }
