@@ -73,6 +73,7 @@ const COMMAND_OPTION_SCHEMAS: Readonly<Record<string, CommandOptionSchema>> = {
   run: { values: ['task', 'allow', 'deny', 'verify', 'provider'], booleans: ['llm', 'no-verify', 'staged'], maxPositionals: 0, agent: 'required' },
   review: { values: ['task', 'allow', 'deny', 'verify', 'provider', 'base', 'final'], booleans: ['llm', 'no-verify', 'staged'], maxPositionals: 0, agent: 'forbidden' },
   report: { booleans: ['json'], maxPositionals: 1, agent: 'forbidden' },
+  journal: { values: ['out', 'since', 'until'], booleans: ['include-output'], maxPositionals: 0, agent: 'forbidden' },
   list: { booleans: ['json'], maxPositionals: 0, agent: 'forbidden' },
   metrics: { booleans: ['json'], maxPositionals: 0, agent: 'forbidden' },
   verify: { maxPositionals: 1, agent: 'forbidden' },
@@ -112,7 +113,7 @@ function parse(argv: string[]): Parsed {
   const positionals: string[] = []
   const values = new Map<string, string[]>()
   const booleans = new Set<string>()
-  const booleanNames = new Set(['llm', 'staged', 'json', 'force', 'help', 'no-verify', 'dry-run', 'yes', 'trust-verify'])
+  const booleanNames = new Set(['llm', 'staged', 'json', 'force', 'help', 'no-verify', 'dry-run', 'yes', 'trust-verify', 'include-output'])
   for (let i = 0; i < before.length; i++) {
     const item = before[i]
     if (!item.startsWith('--')) { positionals.push(item); continue }
@@ -309,6 +310,7 @@ Usage:
   codetruss run --task "..." [--allow GLOB] [--deny GLOB] [--verify CMD] [--llm] [--provider anthropic|openai|claude] -- <agent-cmd>
   codetruss review [--staged] --task "..." [--allow GLOB] [--deny GLOB] [--verify CMD] [--no-verify] [--llm] [--provider anthropic|openai|claude]
   codetruss report [id|latest] [--json]
+  codetruss journal [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--out FILE] [--include-output]
   codetruss list [--json]
   codetruss metrics [--json]
   codetruss setup [--allow GLOB] [--deny GLOB] [--hooks all|pre-commit|claude|codex|none] [--trust-verify] [--yes]
@@ -803,6 +805,19 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
     const receipt = await verifyReceipt(dir, parsed.positionals[0] ?? 'latest', config.signing.publicKeys)
     process.stdout.write(parsed.booleans.has('json') ? `${JSON.stringify(receipt, null, 2)}\n` : renderMarkdown(receipt))
     return 0
+  }
+  if (parsed.command === 'journal') {
+    const { runJournalCommand } = await import('./journal-command.js')
+    return runJournalCommand({
+      root,
+      receiptDirectory: dir,
+      config,
+      out: one(parsed, 'out'),
+      since: one(parsed, 'since'),
+      until: one(parsed, 'until'),
+      includeOutput: parsed.booleans.has('include-output'),
+      output: process.stdout,
+    })
   }
   if (parsed.command === 'list') {
     const ids = await receiptIds(dir)

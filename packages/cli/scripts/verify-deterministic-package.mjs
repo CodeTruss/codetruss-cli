@@ -20,7 +20,10 @@ const EXPECTED_PACKAGE_FILES = [
   'dist',
 ].sort()
 const EXPECTED_GZIP_HEADER = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff])
-const MAX_ARCHIVE_BYTES = 1_000_000
+// Deliberately independent of deterministic-package.mjs (the verifier trusts
+// nothing from the packager), so the two constants move together by hand.
+// Raised with the packager's budget on 2026-08-14 for the journal renderer.
+const MAX_ARCHIVE_BYTES = 1_250_000
 
 const CRC32_TABLE = Array.from({ length: 256 }, (_, value) => {
   let crc = value

@@ -1,13 +1,13 @@
 {
   "name": "@codetruss/cli",
-  "version": "0.2.63",
-  "url": "/downloads/codetruss-cli-0.2.63.tgz",
+  "version": "0.2.64",
+  "url": "/downloads/codetruss-cli-0.2.64.tgz",
   "latestUrl": "/downloads/codetruss-cli-latest.tgz",
-  "sha256": "cc63fdbc491b2ef7ac579bd721488e4a876287930995a0b347b74024180be748",
-  "sbomUrl": "/downloads/codetruss-cli-0.2.63.sbom.cdx.json",
-  "sbomSha256": "6e89ef8f91c0d0cdc893845876af3b1fa225744a89f85c2eac2f5263c7d6dc4a",
+  "sha256": "3f3b6372291d746a012d90833f2ec434d581b546838616fa0b2f8e16386bb81a",
+  "sbomUrl": "/downloads/codetruss-cli-0.2.64.sbom.cdx.json",
+  "sbomSha256": "2f3fc7f34eccf7ec8cbd8ab297f012400c5b26f64a0607cee5440f79ea82a3fb",
   "node": ">=20.9.0",
   "repository": "https://github.com/CodeTruss/codetruss-cli",
-  "releaseUrl": "https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.63",
-  "attestationCommand": "gh attestation verify codetruss-cli-0.2.63.tgz --repo CodeTruss/codetruss-cli"
+  "releaseUrl": "https://github.com/CodeTruss/codetruss-cli/releases/tag/v0.2.64",
+  "attestationCommand": "gh attestation verify codetruss-cli-0.2.64.tgz --repo CodeTruss/codetruss-cli"
 }

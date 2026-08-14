@@ -5,6 +5,50 @@ checksums are published at <https://codetruss.com/downloads/codetruss-cli-latest
 
 ## Unreleased
 
+## 0.2.64 — 2026-08-14
+
+- **`codetruss journal` turns receipts into the deliverable.** A 2026-08-14
+  field report from a real contractor engagement said it plainly: the client
+  wanted a work journal, the receipts sat unread in `.codetruss/`, and the
+  contractor rebuilt our value proposition by hand with screenshots and
+  worklogs. The new command renders every verifiable receipt into one
+  self-contained HTML document — sessions in order, what changed, what
+  verified, verdicts, findings — that a client opens in a browser with nothing
+  installed. The rendering is a view; the evidence is the exact signed
+  receipts embedded in the file, downloadable from its appendix and checkable
+  with `codetruss verify-receipt`, and the journal's session-and-digest
+  manifest is signed by the producing key; the page's presentation is not.
+  Receipts that fail verification are excluded and named in the document,
+  never silently dropped. The rendering reduces the absolute repository path
+  to its basename and omits verification output (`--include-output` shows
+  it); the embedded receipts remain the exact unredacted records — the
+  document's appendix states precisely what that means before anything is
+  handed over.
+
+- **Scope detection now sees the repository instead of probing a name list.**
+  The same engagement's monorepo kept its work in a product-named nested app;
+  detection suggested `server/**` and `docs/**` (both on the fixed
+  fourteen-name list) and never looked at anything else, so the adopted scope
+  flagged every legitimate edit. Suggestion now also reads the roots your own
+  workspace manifests declare (package.json `workspaces`,
+  pnpm-workspace.yaml `packages:`) and scans the repository root for
+  directories carrying their own project manifest or a `src/` child.
+  Hidden, symlinked, and build-output directories never qualify, and a
+  scanned directory must carry its own manifest or a `src/` child — filters
+  chosen to keep an unattended `--yes` scope from adopting junk, though the
+  scan is a heuristic, not a guarantee.
+
+- **Setup now reads the checks a repository documents for itself.** The same
+  repo's handover doc spelled out the exact gate (`tsc --noEmit`) and setup
+  still printed "no verification commands were detected". Detection now mines
+  README.md, docs/*.md, and workflow `run:` steps for single plain commands
+  that begin with a known runner, and prints them with their source file as
+  suggestions only. Nothing mined is ever recorded or executed: shell
+  composition of any kind is rejected even for display, and adopting a
+  suggestion remains the deliberate two-step (write it into `verify:`, then
+  `codetruss verify-policy trust`). A `typecheck` script is also a
+  first-class detection candidate now, beside `lint` and `test`.
+
 ## 0.2.63 — 2026-08-09
 
 - **`codetruss sync` no longer relabels who produced a receipt.** The sync
