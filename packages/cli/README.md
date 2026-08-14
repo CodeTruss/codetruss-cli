@@ -26,14 +26,18 @@ to a repository-wide allow rule, never treats `--yes` as command trust, and
 never uploads anything. Codex asks for one final project-hook approval in
 `/hooks`.
 Non-interactive `--yes` setup does not require `--allow`. With no explicit
-value it adopts every conventional source directory that exists at the
-repository root — `src`, `app`, `apps`, `packages`, `lib`, `components`,
-`server`, `client`, `public`, `test`, `tests`, `e2e`, `spec`, `docs` — as
-`<dir>/**`, prints what it adopted, and continues; it refuses only when none of
-them exist, and then asks for an explicit `--allow`. So an unattended run gets a
-scope derived from the repository rather than one you chose: possibly wider than
-you want, and blind to a source directory outside that list (`source/**`, for
-one), which makes ordinary changes read as out of scope. Pass `--allow` whenever
+value it adopts, as `<dir>/**`: every conventional source directory that exists
+at the repository root (`src`, `app`, `apps`, `packages`, `lib`, `components`,
+`server`, `client`, `public`, `test`, `tests`, `e2e`, `spec`, `docs`); every
+root your own workspace manifests declare (`workspaces` in package.json,
+`packages:` in pnpm-workspace.yaml); and every other root-level directory that
+carries its own project manifest (package.json, pyproject.toml, go.mod,
+Cargo.toml) or a `src/` child — so a monorepo whose work lives in a
+product-named app like `selevita-app/` gets that root instead of flagging every
+legitimate edit. It prints what it adopted and refuses only when nothing at all
+is detected, then asks for an explicit `--allow`. The scope is still derived
+rather than chosen: possibly wider than you want, and a plain directory with
+neither a manifest nor a `src/` child stays undetected. Pass `--allow` whenever
 the scope matters — explicit values are used verbatim and nothing is detected.
 `--trust-verify` is still required before `--yes` can trust detected repository
 commands.
@@ -90,6 +94,22 @@ Provider review never crosses CodeTruss servers. `sync` is the only command that
 uploads to CodeTruss, and it sends a redacted receipt without the patch, absolute
 repository path, agent arguments/start errors, or verification commands/output.
 There is no background usage telemetry, receipt upload, or synchronization.
+
+`codetruss journal` turns the repository's receipts into one self-contained
+HTML work journal — what changed, what verified, each session's verdict — that
+opens in any browser with nothing installed. It is built and written locally
+(`.codetruss/journal.html` by default, `--out` to choose) and uploads nothing.
+The readable part is a rendering; the evidence is the exact signed receipts
+embedded in the file, downloadable from its appendix and checkable with
+`codetruss verify-receipt`, and the journal's session-and-digest manifest is
+signed by your key (the page's presentation is not). The rendering reduces the
+repository's absolute path to its name and omits verification output
+(`--include-output` shows it) — but the embedded receipts are your exact,
+unredacted records, so the FILE still carries the absolute path, full
+verification commands and output, and the agent command line; the appendix
+says so in the document itself. Receipts that fail verification are excluded
+and named, never silently dropped. Share the file deliberately: it is your
+complete work record, made to be handed to a client.
 `codetruss metrics --json` verifies the local signed receipts and emits only
 aggregate first/last UTC dates, active UTC day count, verdict, invocation,
 agent-surface, D7 receipt-pattern, and hook-health fields.

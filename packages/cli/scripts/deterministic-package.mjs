@@ -3,7 +3,10 @@ import { join } from 'node:path'
 
 const TAR_BLOCK_BYTES = 512
 const DEFLATE_STORED_BLOCK_BYTES = 65_535
-export const MAX_PACKAGE_ARCHIVE_BYTES = 1_000_000
+// A guard against accidental bloat (a bundled grammar, an unminified vendor
+// blob), not a target. Raised from 1_000_000 on 2026-08-14: 0.2.63 already sat
+// at 988,770 bytes, so the journal renderer — a deliberate feature — tipped it.
+export const MAX_PACKAGE_ARCHIVE_BYTES = 1_250_000
 
 export const PACKAGE_ARCHIVE_FILES = [
   { source: 'CHANGELOG.md', archive: 'package/CHANGELOG.md', mode: 0o644 },

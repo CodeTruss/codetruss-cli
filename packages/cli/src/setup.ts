@@ -1,5 +1,7 @@
-import { access, lstat } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { access, lstat, readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { parse as parseYaml } from 'yaml'
 import { createInterface } from 'node:readline/promises'
 import type { Readable, Writable } from 'node:stream'
 import { CONFIG_FILE, detectVerifyCommands, initialize, loadConfig, type VerifyDetection } from './config.js'
@@ -74,17 +76,94 @@ async function exists(path: string): Promise<boolean> {
   return access(path).then(() => true, () => false)
 }
 
-export async function suggestedAllowGlobs(root: string): Promise<string[]> {
-  const suggestions: string[] = []
-  for (const directory of SUGGESTED_SCOPE_DIRECTORIES) {
-    try {
-      const metadata = await lstat(join(root, directory))
-      if (metadata.isDirectory() && !metadata.isSymbolicLink()) suggestions.push(`${directory}/**`)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    }
+/** Build/output directories a shallow scan must never suggest as change roots. */
+const SCAN_EXCLUDED_DIRECTORIES = new Set([
+  'node_modules', 'dist', 'build', 'out', 'coverage', 'vendor', 'tmp', 'target', '.git',
+])
+
+/** Manifest files whose presence marks a directory as a nested project root. */
+const PROJECT_ROOT_MANIFESTS = ['package.json', 'pyproject.toml', 'go.mod', 'Cargo.toml'] as const
+
+async function safeDirectory(path: string): Promise<boolean> {
+  try {
+    const metadata = await lstat(path)
+    return metadata.isDirectory() && !metadata.isSymbolicLink()
+  } catch {
+    // Missing or unreadable either way: a directory setup cannot even stat
+    // must not be suggested, and must not abort the whole suggestion pass.
+    return false
   }
-  return suggestions
+}
+
+/**
+ * Directory names the repository's own workspace manifests declare as project
+ * roots. Read, never guessed: `workspaces` in package.json and `packages:` in
+ * pnpm-workspace.yaml name exactly the roots the maintainer means. Only the
+ * literal prefix of each pattern is used, and only if it exists on disk.
+ */
+async function workspaceDeclaredRoots(root: string): Promise<string[]> {
+  const patterns: string[] = []
+  try {
+    const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      workspaces?: string[] | { packages?: string[] }
+    }
+    const declared = Array.isArray(manifest.workspaces) ? manifest.workspaces : manifest.workspaces?.packages
+    for (const entry of declared ?? []) if (typeof entry === 'string') patterns.push(entry)
+  } catch {
+    // No root package.json, or unparseable — workspaces simply are not declared.
+  }
+  try {
+    const workspace = parseYaml(await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8')) as {
+      packages?: unknown
+    }
+    if (Array.isArray(workspace?.packages)) {
+      for (const entry of workspace.packages) if (typeof entry === 'string') patterns.push(entry)
+    }
+  } catch {
+    // No pnpm workspace file, or unparseable.
+  }
+  const roots: string[] = []
+  for (const pattern of patterns) {
+    if (pattern.startsWith('!')) continue
+    const prefix = pattern.split('*')[0].replace(/\/+$/, '')
+    const first = prefix.split('/')[0]
+    if (!first || first.startsWith('.') || SCAN_EXCLUDED_DIRECTORIES.has(first)) continue
+    if (await safeDirectory(join(root, first))) roots.push(first)
+  }
+  return roots
+}
+
+/** Does this directory look like a nested project root (its own manifest or a conventional source child)? */
+async function looksLikeProjectRoot(path: string): Promise<boolean> {
+  for (const manifest of PROJECT_ROOT_MANIFESTS) {
+    if (await exists(join(path, manifest))) return true
+  }
+  return safeDirectory(join(path, 'src'))
+}
+
+export async function suggestedAllowGlobs(root: string): Promise<string[]> {
+  const names = new Set<string>()
+  for (const directory of SUGGESTED_SCOPE_DIRECTORIES) {
+    if (await safeDirectory(join(root, directory))) names.add(directory)
+  }
+  for (const declared of await workspaceDeclaredRoots(root)) names.add(declared)
+  // Shallow scan for project roots the conventional list misses — a nested app
+  // named after the product (selevita-app/) holds the actual work, and a scope
+  // that omits it flags every legitimate edit. Only directories that carry
+  // their own project manifest (or a src/ child) qualify, so junk directories
+  // never widen an unattended --yes scope.
+  let entries: Dirent[] = []
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch {
+    // An unreadable root yields no scan suggestions; manifest roots stand.
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+    if (entry.name.startsWith('.') || SCAN_EXCLUDED_DIRECTORIES.has(entry.name) || names.has(entry.name)) continue
+    if (await looksLikeProjectRoot(join(root, entry.name))) names.add(entry.name)
+  }
+  return [...names].map((name) => `${name}/**`)
 }
 
 async function resolveAllowGlobs(
@@ -142,6 +221,21 @@ async function resolveHookTarget(
   return hookTarget(answer || 'all')!
 }
 
+/**
+ * Commands the repository's own docs or workflows name, rendered with their
+ * source so the human can judge them. Never recorded, never trusted here —
+ * repository prose is untrusted input, and adopting a command stays a
+ * deliberate two-step (write it into verify:, then codetruss verify-policy
+ * trust).
+ */
+function documentedLines(detection: VerifyDetection): string[] {
+  if (!detection.documented?.length) return []
+  return [
+    'Command-shaped lines found in this repository\'s docs and workflows (suggestions only, never auto-recorded or vetted):\n',
+    ...detection.documented.map(({ command, source }) => `  - ${command}  (${source})\n`),
+  ]
+}
+
 function detectionLines(detection: VerifyDetection, withheld: boolean): string[] {
   const list = detection.candidates.map((entry) => `  - ${entry}\n`)
   if (detection.commands.length) {
@@ -151,6 +245,7 @@ function detectionLines(detection: VerifyDetection, withheld: boolean): string[]
       ...(withheld
         ? ['They execute repository code, and an unattended run must not approve that on your behalf.\n']
         : []),
+      ...documentedLines(detection),
       `To enable them: add them under verify: in ${CONFIG_FILE}, then run codetruss verify-policy trust\n`,
     ]
   }
@@ -159,6 +254,7 @@ function detectionLines(detection: VerifyDetection, withheld: boolean): string[]
       'Found package.json scripts but recorded no verification commands:\n',
       ...list,
       'No lockfile is committed, so CodeTruss cannot tell which package manager runs them.\n',
+      ...documentedLines(detection),
       `To enable them: commit a lockfile and rerun setup, or add the exact commands under verify: in ${CONFIG_FILE}, then run codetruss verify-policy trust\n`,
     ]
   }
@@ -166,7 +262,15 @@ function detectionLines(detection: VerifyDetection, withheld: boolean): string[]
     return [
       'Detected repository verification commands but their package manager is not on PATH:\n',
       ...list,
+      ...documentedLines(detection),
       `To enable them: install the package manager and rerun setup, or add the exact commands under verify: in ${CONFIG_FILE}, then run codetruss verify-policy trust\n`,
+    ]
+  }
+  if (detection.documented?.length) {
+    return [
+      'No runnable verification commands were detected. Command-shaped lines found in its docs and workflows (suggestions only, never vetted):\n',
+      ...detection.documented.map(({ command, source }) => `  - ${command}  (${source})\n`),
+      `To adopt one: add it under verify: in ${CONFIG_FILE}, then run codetruss verify-policy trust\n`,
     ]
   }
   return [`No repository verification commands were detected; add trusted checks to verify: in ${CONFIG_FILE} when ready.\n`]

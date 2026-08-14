@@ -115,6 +115,26 @@ describe('CLI snapshot and delta enforcement', () => {
     expect(`${setup.stderr}${setup.stdout}`).toContain('--allow')
   }, 30_000)
 
+  it('adopts a nested app the conventional name list misses', async () => {
+    // The 2026-08-14 field shape: the actual work lives in a product-named
+    // nested app. A scope of server/** and docs/** alone flags every
+    // legitimate edit, which is worse than detecting nothing.
+    const root = await repository()
+    await mkdir(join(root, 'server'))
+    await mkdir(join(root, 'docs'))
+    await mkdir(join(root, 'selevita-app', 'src'), { recursive: true })
+    await writeFile(join(root, 'selevita-app', 'package.json'), '{"name":"selevita-app","private":true}\n')
+    await installPersistentCliFixture(root)
+    await writeFile(join(root, '.gitignore'), '/node_modules\n')
+
+    const setup = runCli(root, ['setup', '--yes'], {})
+
+    expect(setup.status, `${setup.stderr}\n${setup.stdout}`).toBe(0)
+    expect(setup.stdout).toContain('selevita-app/**')
+    const config = await readFile(join(root, '.codetruss.yml'), 'utf8')
+    expect(config).toContain('- selevita-app/**')
+  }, 30_000)
+
   it('names the verification commands unattended setup withheld instead of claiming none exist', async () => {
     // D2/D3: with `"test": "vitest run"` and a lockfile on disk, setup printed
     // "No repository verification commands were detected" — which reads as

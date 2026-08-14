@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { access, lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { constants as fsConstants, lstatSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parse, stringify } from 'yaml'
@@ -309,6 +309,133 @@ export interface VerifyDetection {
    * script names under `missing-lockfile`, where no manager could be resolved.
    */
   candidates: string[]
+  /**
+   * Commands the repository's own prose documents — README, docs/*.md,
+   * workflow run steps. Suggestions ONLY: they are shown with their source
+   * file and are never recorded into `verify:`, because repository text is
+   * untrusted input. Adopting one requires a human to write it into
+   * `.codetruss.yml` and run `codetruss verify-policy trust`.
+   */
+  documented?: { command: string; source: string }[]
+}
+
+/** Runners a documented suggestion may begin with; anything else is prose. */
+const DOCUMENTED_COMMAND_RUNNERS = new Set([
+  'tsc', 'pnpm', 'npm', 'npx', 'yarn', 'node', 'vitest', 'jest', 'eslint', 'prettier',
+  'pytest', 'ruff', 'mypy', 'go', 'cargo', 'make', 'tsx',
+])
+const DOCUMENTED_FILE_LIMIT = 24
+const DOCUMENTED_BYTES_PER_FILE = 262_144
+const DOCUMENTED_RESULT_LIMIT = 8
+
+/**
+ * One argv-shaped command line, or nothing. Shell composition of any kind —
+ * pipes, chaining, redirection, substitution — is rejected outright: a
+ * malicious doc can at worst DISPLAY a command labeled with its source file,
+ * and even the display refuses anything that is not a single plain invocation.
+ */
+function documentedCommand(line: string): string | undefined {
+  const trimmed = line.trim().replace(/^\$\s+/, '')
+  if (!trimmed || trimmed.length > 200) return undefined
+  if (!/^[\w./@:=\- ]+$/.test(trimmed)) return undefined
+  const runner = trimmed.split(/\s+/)[0]
+  return DOCUMENTED_COMMAND_RUNNERS.has(runner) ? trimmed : undefined
+}
+
+function commandsFromMarkdown(text: string): string[] {
+  const results: string[] = []
+  for (const match of text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)) {
+    for (const line of match[1].split('\n')) {
+      const command = documentedCommand(line)
+      if (command) results.push(command)
+    }
+  }
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    const command = documentedCommand(match[1])
+    if (command) results.push(command)
+  }
+  return results
+}
+
+function commandsFromWorkflow(text: string): string[] {
+  const results: string[] = []
+  let parsed: unknown
+  try {
+    parsed = parse(text)
+  } catch {
+    return results
+  }
+  const jobs = (parsed as { jobs?: unknown })?.jobs
+  if (!jobs || typeof jobs !== 'object') return results
+  for (const job of Object.values(jobs as Record<string, { steps?: { run?: unknown }[] }>)) {
+    if (!job || !Array.isArray(job.steps)) continue
+    for (const step of job.steps) {
+      if (typeof step?.run !== 'string') continue
+      for (const line of step.run.split('\n')) {
+        const command = documentedCommand(line)
+        if (command) results.push(command)
+      }
+    }
+  }
+  return results
+}
+
+/**
+ * The gate a repository documents for itself — a handover doc spelling out
+ * `tsc --noEmit`, a workflow running the real checks — mined so setup can say
+ * "found in docs/HANDOVER.md, not recorded" instead of the false "no
+ * verification commands were detected". Bounded reads; display-only output.
+ */
+async function mineDocumentedVerifyCandidates(
+  root: string,
+  known: Iterable<string>,
+): Promise<{ command: string; source: string }[]> {
+  // The source label prints in setup output, so a filename is held to the
+  // same byte discipline as a command: no control characters, no spaces, no
+  // surprises. Files with wilder names are simply not mined.
+  const safeName = (name: string) => /^[\w.\-]{1,120}$/.test(name)
+  const sources: { path: string; extract: (text: string) => string[] }[] = [
+    { path: 'README.md', extract: commandsFromMarkdown },
+  ]
+  try {
+    for (const entry of await readdir(join(root, 'docs'), { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith('.md') && safeName(entry.name)) {
+        sources.push({ path: `docs/${entry.name}`, extract: commandsFromMarkdown })
+      }
+    }
+  } catch {
+    // No docs directory.
+  }
+  try {
+    for (const entry of await readdir(join(root, '.github', 'workflows'), { withFileTypes: true })) {
+      if (entry.isFile() && /\.ya?ml$/.test(entry.name) && safeName(entry.name)) {
+        sources.push({ path: `.github/workflows/${entry.name}`, extract: commandsFromWorkflow })
+      }
+    }
+  } catch {
+    // No workflows directory.
+  }
+  const documented: { command: string; source: string }[] = []
+  const seen = new Set(known)
+  for (const source of sources.slice(0, DOCUMENTED_FILE_LIMIT)) {
+    let text: string
+    try {
+      // lstat, not stat: a symlinked doc could otherwise walk the miner out
+      // of the repository entirely.
+      const metadata = await lstat(join(root, source.path))
+      if (!metadata.isFile() || metadata.size > DOCUMENTED_BYTES_PER_FILE) continue
+      text = await readFile(join(root, source.path), 'utf8')
+    } catch {
+      continue
+    }
+    for (const command of source.extract(text)) {
+      if (seen.has(command)) continue
+      seen.add(command)
+      documented.push({ command, source: source.path })
+      if (documented.length >= DOCUMENTED_RESULT_LIMIT) return documented
+    }
+  }
+  return documented
 }
 
 async function detectVerify(root: string): Promise<string[]> {
@@ -316,6 +443,12 @@ async function detectVerify(root: string): Promise<string[]> {
 }
 
 export async function detectVerifyCommands(root: string): Promise<VerifyDetection> {
+  const detection = await recordableVerifyDetection(root)
+  const documented = await mineDocumentedVerifyCandidates(root, [...detection.commands, ...detection.candidates])
+  return documented.length ? { ...detection, documented } : detection
+}
+
+async function recordableVerifyDetection(root: string): Promise<VerifyDetection> {
   const exists = async (name: string) => access(join(root, name)).then(() => true, () => false)
   // Detect commands without executing repository-controlled code. This also
   // recognizes Windows package-manager shims such as `pnpm.cmd`.
@@ -349,13 +482,13 @@ export async function detectVerifyCommands(root: string): Promise<VerifyDetectio
       throw new Error(`could not inspect package.json: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  /** The same [lint, test] collection for every Node package manager. */
+  /** The same [lint, typecheck, test] collection for every Node package manager. */
   const nodeScripts = async (
     manager: 'pnpm' | 'npm' | 'yarn',
     format: (name: string) => string,
   ): Promise<VerifyDetection> => {
     const scripts = await packageScripts()
-    const candidates = ['lint', 'test'].filter((name) => typeof scripts[name] === 'string').map(format)
+    const candidates = ['lint', 'typecheck', 'test'].filter((name) => typeof scripts[name] === 'string').map(format)
     if (!candidates.length) return { commands: [], candidates: [] }
     return await available(manager)
       ? { commands: candidates, candidates }
@@ -375,7 +508,7 @@ export async function detectVerifyCommands(root: string): Promise<VerifyDetectio
   // where detection legitimately fails: CodeTruss cannot tell which package
   // manager to invoke. Say that, rather than implying there is nothing to run.
   const scripts = await packageScripts()
-  const candidates = ['lint', 'test'].filter((name) => typeof scripts[name] === 'string')
+  const candidates = ['lint', 'typecheck', 'test'].filter((name) => typeof scripts[name] === 'string')
   if (candidates.length) return { commands: [], candidates, blocker: 'missing-lockfile' }
   return { commands: [], candidates: [] }
 }
